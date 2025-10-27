@@ -1,5 +1,3 @@
-%% writefile validate_mpgguf.cu
-
 // mpgguf_validate.cu  — MPGGUF v2 validator with hardened GGUF/MP readers
 //
 // Build:
@@ -28,6 +26,7 @@
 #include <cstring>
 #include <fstream>
 #include <iostream>
+#include <sstream>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -52,6 +51,49 @@ static inline bool aligned32(uint64_t x) {
 
 static inline bool aligned64(uint64_t x) {
     return (x & 63ull) == 0ull;
+}
+
+
+static std::vector<uint8_t> readStreamData(std::ifstream& f, size_t sz, size_t offset) {
+    std::vector<uint8_t> out;
+
+    if (!f.good()) return out;
+
+    // 1) Clear any eof/fail from prior ops; required before seekg on some FUSE filesystems.
+    f.clear();
+
+    // 2) Find file size.
+    std::istream::pos_type cur = f.tellg();
+    f.seekg(0, std::ios::end);
+    std::istream::pos_type end = f.tellg();
+    if (end <= 0) { f.clear(); return out; }
+    const size_t file_size = static_cast<size_t>(end);
+
+    // 3) Validate and clamp request.
+    if (offset >= file_size) { f.clear(); return out; }
+    const size_t to_read = std::min(sz, file_size - offset);
+
+    // 4) Seek to absolute offset from beginning.
+    f.clear(); // (again, in case tellg/setg flipped eof)
+    f.seekg(static_cast<std::streamoff>(offset), std::ios::beg);
+    if (!f.good()) { f.clear(); return out; }
+
+    // 5) Read with partial-read handling.
+    out.resize(to_read);
+    f.read(reinterpret_cast<char*>(out.data()), static_cast<std::streamsize>(to_read));
+    const auto got = static_cast<size_t>(f.gcount());
+    if (got < to_read) {
+        out.resize(got);
+        // Reset state so later calls can still seek/read.
+        f.clear();
+    }
+    return out;
+}
+
+static uint64_t align_up(uint64_t off, uint32_t align)
+{
+    const uint64_t mask = static_cast<uint64_t>(align) - 1u;
+    return (off + mask) & ~mask;
 }
 
 static inline bool is_ascii_identifier(const std::string& s) {
@@ -82,7 +124,19 @@ struct MP
 {
     std::vector<Rec>     recs;
     std::vector<uint8_t> kv;
-    std::vector<uint8_t> data;
+    std::ifstream        f;
+    size_t               data_offset;
+    size_t               data_sz;
+
+    bool Open(const std::string& path)
+    {
+        f.open(path, std::ios::binary);
+        if (!f.is_open()) {
+            return false;
+        }
+
+        return true;
+    }
 };
 
 static inline uint32_t rd_u32(const uint8_t* p)
@@ -106,11 +160,10 @@ static bool in_range(uint64_t off, uint64_t sz, size_t total)
 
 bool load_mp(const std::string& path, MP& out)
 {
-    std::ifstream f(path, std::ios::binary);
-    if (!f) {
-        std::cerr << "open failed: " << path << "\n";
+    if (out.Open(path) == false)
         return false;
-    }
+
+    auto& f = out.f;
 
     // Header
     char mg[7];
@@ -226,8 +279,9 @@ bool load_mp(const std::string& path, MP& out)
     }
 
     // Data region
-        // 1. Get the current position
+    // 1. Get the current position
     std::streampos current_pos = f.tellg();
+    current_pos = align_up(current_pos, 64);
 
     // 2. Seek to the end
     f.seekg(0, std::ios::end);
@@ -241,32 +295,9 @@ bool load_mp(const std::string& path, MP& out)
     // 5. Seek back to the current position
     f.seekg(current_pos);
 
-    // 6. Allocate and read
-    out.data.resize(remaining_size);
-    f.read((char*)&out.data[0], remaining_size);
+    out.data_offset = (size_t)current_pos;
+    out.data_sz = (size_t)remaining_size;
 
-    //out.data.assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
-    const size_t D = out.data.size();
-
-    // Range checks now that data size is known
-    for (const auto& r : out.recs)
-    {
-        if (r.sz_low && !in_range(r.off_low, r.sz_low, D))
-        {
-            std::cerr << "ERROR: LOW slice OOB for " << r.name << "\n";
-            return false;
-        }
-        if (r.sz_high && !in_range(r.off_high, r.sz_high, D))
-        {
-            std::cerr << "ERROR: HIGH slice OOB for " << r.name << "\n";
-            return false;
-        }
-        if (r.sz_fp && !in_range(r.off_fp, r.sz_fp, D))
-        {
-            std::cerr << "ERROR: FP slice OOB for " << r.name << "\n";
-            return false;
-        }
-    }
     return true;
 }
 
@@ -389,6 +420,7 @@ static void skipv(std::istream& f)
 
 struct GRec
 {
+    size_t                splitId;
     std::string           name;
     uint32_t              nd;
     std::vector<uint64_t> dims;
@@ -399,7 +431,17 @@ struct GRec
 struct GG
 {
     std::vector<GRec>    recs;
-    std::vector<uint8_t> whole;
+    std::ifstream f;
+
+    bool Open(const std::string& path)
+    {
+        f.open(path, std::ios::binary);
+        if (!f.is_open()) {
+            return false;
+        }
+
+        return true;
+    }
 };
 
 static size_t numel(const std::vector<uint64_t>& d)
@@ -411,28 +453,26 @@ static size_t numel(const std::vector<uint64_t>& d)
     return n;
 }
 
-bool load_fp(const std::string& path, GG& out)
+bool load_fp(const size_t splitId, const std::string& path, GG& out)
 {
-    std::ifstream f(path, std::ios::binary);
-    if (!f) {
+    if (!out.Open(path))
+    {
         std::cerr << "open failed: " << path << "\n";
         return false;
     }
 
-    // Header
     char mg[4];
-    f.read(mg, 4);
+    out.f.read(mg, 4);
     if (std::string(mg, 4) != "GGUF") {
         std::cerr << "not GGUF: " << path << "\n";
         return false;
     }
     uint32_t ver = 0;
-    f.read((char*)&ver, 4);
-    uint64_t n_kv = 0, n_t = 0;
-    f.read((char*)&n_t, 8);
-    f.read((char*)&n_kv, 8);
+    out.f.read((char*)&ver, 4);
+    uint64_t n_t = 0, n_kv = 0;
+    out.f.read((char*)&n_t, 8);
+    out.f.read((char*)&n_kv, 8);
 
-    // Sanity caps (huge buffers would be nonsense)
     const uint64_t kMaxKV = 200000, kMaxT = 200000;
     if (n_kv == 0 || n_kv > kMaxKV) {
         std::cerr << "ERROR: suspicious n_kv=" << n_kv << "\n";
@@ -446,69 +486,67 @@ bool load_fp(const std::string& path, GG& out)
     // Skip KV
     try {
         for (uint64_t i = 0; i < n_kv; i++) {
-            (void)rd_s(f);
-            skipv(f);
+            (void)rd_s(out.f);
+            skipv(out.f);
         }
     }
     catch (const std::exception& e) {
         std::cerr << "WARN: KV skip failed: " << e.what() << ", continuing\n";
     }
 
-    // Tensor table with sanity checks
+    // Tensor table
     std::vector<GRec> recs;
     recs.reserve((size_t)n_t);
-    for (uint64_t i = 0; i < n_t; i++)
-    {
-        std::string name = rd_s(f);
-        if (!is_ascii_identifier(name))
-        {
+    for (uint64_t i = 0; i < n_t; i++) {
+        std::string name = rd_s(out.f);
+        if (!is_ascii_identifier(name)) {
             std::cerr << "ERROR: bad tensor name " << name << "\n";
             return false;
         }
 
         uint32_t nd = 0;
-        f.read((char*)&nd, 4);
-        if (nd == 0 || nd > 6)
-        {
+        out.f.read((char*)&nd, 4);
+        if (nd == 0 || nd > 6) {
             std::cerr << "ERROR: bad nd=" << nd << " for " << name << "\n";
             return false;
         }
 
         std::vector<uint64_t> dims(nd);
-        for (uint32_t d = 0; d < nd; ++d)
-        {
-            f.read((char*)&dims[d], 8);
-            if (dims[d] == 0 || dims[d] > (uint64_t) 1e10)
-            {
+        for (uint32_t d = 0; d < nd; ++d) {
+            out.f.read((char*)&dims[d], 8);
+            if (dims[d] == 0 || dims[d] > (uint64_t) 1e10) {
                 std::cerr << "ERROR: bad dim[" << d << "]=" << dims[d] << " for " << name << "\n";
                 return false;
             }
         }
 
         uint32_t g = 0;
-        f.read((char*)&g, 4);
+        out.f.read((char*)&g, 4);
         uint64_t off = 0;
-        f.read((char*)&off, 8);
-        if (!aligned32(off))
-        {
+        out.f.read((char*)&off, 8);
+        if (!aligned32(off)) {
             std::cerr << "ERROR: tensor data offset not 32B aligned for " << name << "\n";
             return false;
         }
 
-        recs.push_back({ std::move(name), nd, std::move(dims), g, off, 0 });
+        recs.push_back({ splitId, std::move(name), nd, std::move(dims), g, off, 0 });
     }
 
-    // Compute sizes by next off / EOF and check monotonicity
-    f.seekg(0, std::ios::end);
-    size_t fsz = (size_t)f.tellg();
+    // 4) Remember the start of the data block
+    uint64_t data_block_start = static_cast<uint64_t>(out.f.tellg());
+    data_block_start = align_up(data_block_start, 32);
+
+    // Sizes by next off / EOF
+    out.f.seekg(0, std::ios::end);
+    size_t fsz = (size_t)out.f.tellg();
+
     std::vector<GRec*> ord;
     ord.reserve(recs.size());
-    for (auto& r : recs)
+    for (auto& r : recs) {
         ord.push_back(&r);
-
+    }
     std::sort(ord.begin(), ord.end(), [](auto* a, auto* b) { return a->off < b->off; });
-    for (size_t i = 0; i < ord.size(); ++i)
-    {
+    for (size_t i = 0; i < ord.size(); ++i) {
         uint64_t nxt = (i + 1 < ord.size()) ? ord[i + 1]->off : (uint64_t)fsz;
         if (nxt < ord[i]->off) {
             std::cerr << "ERROR: decreasing offsets in baseline\n";
@@ -517,16 +555,12 @@ bool load_fp(const std::string& path, GG& out)
         ord[i]->sz = nxt - ord[i]->off;
     }
 
+    for (auto& r : recs)
+        r.off += data_block_start;
+
     // Whole file
-    f.seekg(0, std::ios::end);
-    std::streampos file_size = f.tellg();
-    f.seekg(0, std::ios::beg);
-
-    out.whole.resize(static_cast<size_t>(file_size));               // Allocate exact size
-
-    f.read(reinterpret_cast<char*>(out.whole.data()), file_size);  // Read directly into buffer
     out.recs = std::move(recs);
-
+    out.f.seekg(0, std::ios::beg);
     return true;
 }
 
@@ -554,79 +588,70 @@ __global__ void k_deq_q8(const int8_t* q, const uint16_t* s, __half* out, int bl
 
 namespace q2k_detail {
     static constexpr int    QK_K = 256;
-    static constexpr size_t BYTES_PER_BLOCK = 84;
+    static constexpr int    SCALES_SZ = QK_K / 16; // 16
+    static constexpr int    QS_SZ = QK_K / 4;  // 64
+    // CPU layout: [scales | qs | d(2) dmin(2)]
+    static constexpr int    BYTES_PER_BLOCK = SCALES_SZ + QS_SZ + 4; // 84
 
     __device__ __forceinline__ uint16_t ld_u16_le(const uint8_t* p) {
-        // Unaligned little-endian 16-bit load
         return static_cast<uint16_t>(p[0]) | (static_cast<uint16_t>(p[1]) << 8);
     }
-}  // namespace q2k_detail
+}
 
-__global__ void k_deq_q2_k_to_f16(const uint8_t* __restrict__ bytes,
+// Kernel: writes __half
+__global__ void k_deq_q2_k_to_f16_scales_qs_tail(
+    const uint8_t* __restrict__ bytes,
     __half* __restrict__ out,
     size_t n_elems,
-    int    blocks) {
+    int    blocks)
+{
     using namespace q2k_detail;
 
-    int b = blockIdx.x * blockDim.x + threadIdx.x;
-    if (b >= blocks) {
-        return;
-    }
+    const int b = blockIdx.x * blockDim.x + threadIdx.x;
+    if (b >= blocks) return;
 
-    const size_t    sb_off = static_cast<size_t>(b) * BYTES_PER_BLOCK;
-    const uint8_t* sb = bytes + sb_off;
+    const size_t block_byte_off = static_cast<size_t>(b) * BYTES_PER_BLOCK;
+    const uint8_t* base_ptr = bytes + block_byte_off;
 
-    // d and dmin: fp16 (LE) -> float
-    const uint16_t d16 = ld_u16_le(sb + 0);
-    const uint16_t dmin16 = ld_u16_le(sb + 2);
+    // [scales | qs | d(2) dmin(2)]
+    const uint8_t* scales = base_ptr;                 // 16 bytes
+    const uint8_t* qs = base_ptr + SCALES_SZ;     // 64 bytes
+    const uint8_t* tail = qs + QS_SZ;               // 4 bytes
 
-    float d = __half2float(__ushort_as_half(d16));
-    float dmin = __half2float(__ushort_as_half(dmin16));
+    const uint16_t d16 = q2k_detail::ld_u16_le(tail + 0);
+    const uint16_t dmin16 = q2k_detail::ld_u16_le(tail + 2);
 
-    // scales & qs regions
-    const uint8_t* scales = sb + 4;   // 16 bytes
-    const uint8_t* qs = sb + 20;  // 64 bytes
+    const float d = __half2float(__ushort_as_half(d16));
+    const float dmin = __half2float(__ushort_as_half(dmin16));
 
-    // tail-guard for last partial super-block
-    const size_t base = static_cast<size_t>(b) * QK_K;
-    size_t remaining = (base >= n_elems) ? 0 : (n_elems - base);
-    int block_elems = (remaining < (size_t)QK_K) ? (int)remaining : QK_K;
-    if (block_elems <= 0) {
-        return;
-    }
-
-    // process 16 sub-blocks × 16 weights
-#pragma unroll
-    for (int sb16 = 0; sb16 < 16; ++sb16) {
-        const uint8_t sm = scales[sb16];
-        float         scale = d * float(sm & 0x0F);            // low nibble = scale
-        float         minv = dmin * float((sm >> 4) & 0x0F);  // high nibble = min
-
-        // Match CPU behavior: zero non-finite scale/minv
-        if (!isfinite(scale)) {
-            scale = 0.0f;
-        }
-        if (!isfinite(minv)) {
-            minv = 0.0f;
-        }
-
-        const int sb_base = sb16 * 16;
+    const size_t out_base = static_cast<size_t>(b) * QK_K;
+    if (out_base >= n_elems) return;
+    const int block_elems = static_cast<int>(min(static_cast<size_t>(QK_K), n_elems - out_base));
 
 #pragma unroll
-        for (int j = 0; j < 16; ++j) {
-            const int i = sb_base + j;
-            if (i >= block_elems) {
-                break;
-            }
+    for (int g = 0; g < 16; ++g) {
+        const uint8_t s = scales[g];
+        const float dl = d * float(s & 0x0F);
+        const float ml = dmin * float(s >> 4);
 
-            // 2-bit unpack: 4 codes per byte
-            const int     qi = i;  // 0..255 within super-block
-            const uint8_t by = qs[qi >> 2];
-            const uint8_t sh = (qi & 3) * 2;
-            const uint8_t q = (by >> sh) & 0x3;  // 0..3
+        const uint8_t b0 = qs[g * 4 + 0];
+        const uint8_t b1 = qs[g * 4 + 1];
+        const uint8_t b2 = qs[g * 4 + 2];
+        const uint8_t b3 = qs[g * 4 + 3];
 
-            const float w = scale * float(q) + minv;
-            out[base + i] = __float2half_rn(w);  // CPU doesn't post-check w; we cast directly
+#pragma unroll
+        for (int i = 0; i < 16; ++i) {
+            const int idx_in_block = g * 16 + i;
+            if (idx_in_block >= block_elems) break;
+
+            const uint8_t pack = (i < 4) ? b0 : (i < 8) ? b1 : (i < 12) ? b2 : b3;
+            const uint8_t shift = static_cast<uint8_t>((i & 3) * 2);
+            const uint8_t q2 = static_cast<uint8_t>((pack >> shift) & 0x3u);
+
+            // Match CPU: val = dl * q2 - ml
+            const float val = dl * float(q2) - ml;
+
+            out[out_base + idx_in_block] = __float2half_rn(val);
         }
     }
 }
@@ -671,21 +696,16 @@ static __half* dequant_try_Q2_K(const uint8_t* bytes, size_t sz, size_t n_elems)
 {
     using namespace q2k_detail;
 
-    if (!bytes || n_elems == 0) {
-        return nullptr;
-    }
+    if (!bytes || n_elems == 0) return nullptr;
 
-    auto ceil_div = [](size_t a, size_t b) {
-        return (a + b - 1) / b;
-        };
+    auto ceil_div = [](size_t a, size_t b) { return (a + b - 1) / b; };
     const int    blocks = int(ceil_div(n_elems, size_t(QK_K)));
     const size_t expect = size_t(blocks) * BYTES_PER_BLOCK;
     if (sz != expect) {
-        // Not a raw Q2_K payload (or wrong size).
+        // Not a raw Q2_K payload (or wrong size for QK_K=256).
         return nullptr;
     }
 
-    // Upload packed payload; allocate output
     uint8_t* d_bytes = nullptr;
     __half* d_out = nullptr;
 
@@ -693,10 +713,10 @@ static __half* dequant_try_Q2_K(const uint8_t* bytes, size_t sz, size_t n_elems)
     CUDA_OK(cudaMemcpy(d_bytes, bytes, sz, cudaMemcpyHostToDevice));
     CUDA_OK(cudaMalloc(&d_out, n_elems * sizeof(__half)));
 
-    // Launch 1 thread per super-block
     const int th = 256;
     const int bl = (blocks + th - 1) / th;
-    k_deq_q2_k_to_f16 << <bl, th >> > (d_bytes, d_out, n_elems, blocks);
+    k_deq_q2_k_to_f16_scales_qs_tail << <bl, th >> > (d_bytes, d_out, n_elems, blocks);
+    //CUDA_OK(cudaGetLastError());
     CUDA_OK(cudaDeviceSynchronize());
 
     cudaFree(d_bytes);
@@ -738,23 +758,43 @@ int main(int argc, char** argv)
         std::cerr << "Missing --mpgguf or --fp16\n";
         return 1;
     }
+    auto split = [](const std::string& s, char delimiter) -> std::vector<std::string>
+    {
+        std::vector<std::string> tokens;
+        std::string token;
+        std::istringstream tokenStream(s);
+        while (std::getline(tokenStream, token, delimiter)) {
+            tokens.push_back(token);
+        }
+        return tokens;
+    };
+
+    auto pfps = split(pfp, ',');
 
     MP mp;
     if (!load_mp(pmp, mp)) {
         std::cerr << "bad mpgguf\n";
         return 1;
     }
-    GG gg;
-    if (!load_fp(pfp, gg))
+    std::vector<GG> ggs;
+    ggs.resize(pfps.size());
+
+    for (size_t i = 0; i < pfps.size(); i++)
     {
-        std::cerr << "bad gguf baseline\n";
-        return 1;
+        if (!load_fp(i, pfps[i], ggs[i]))
+        {
+            std::cerr << "bad gguf baseline\n";
+            return 1;
+        }
     }
 
     // Map baseline by name
     std::unordered_map<std::string, GRec*> truth;
-    for (auto& r : gg.recs)
-        truth[r.name] = &r;
+    for (auto& gg : ggs)
+    {
+        for (auto& r : gg.recs)
+            truth[r.name] = &r;
+    }
 
     auto N = [](const std::vector<uint64_t>& d) -> size_t {
         return numel(d);
@@ -819,13 +859,14 @@ int main(int argc, char** argv)
 
         // Build FP16 truth (accept FP16 or FP32 tensor payloads)
         __half* d_truth = nullptr;
-        const uint8_t* tb = gg.whole.data() + tr.off;
-        if (tr.sz == n * sizeof(__half))
+        auto stream_data = readStreamData(ggs[tr.splitId].f, n * sizeof(size_t), tr.off);
+        const uint8_t* tb = stream_data.data();
+        if (tr.g == 30)
         {
             CUDA_OK(cudaMalloc(&d_truth, tr.sz));
             CUDA_OK(cudaMemcpy(d_truth, tb, tr.sz, cudaMemcpyHostToDevice));
         }
-        else if (tr.sz == n * sizeof(float))
+        else if (tr.g == 0)
         {
             float* df = nullptr;
             CUDA_OK(cudaMalloc(&df, tr.sz));
@@ -847,15 +888,18 @@ int main(int argc, char** argv)
         }
 
         // HIGH (Q8_0 expected)
-        if (r.sz_high && in_range(r.off_high, r.sz_high, mp.data.size()) && r.g_high == 8)
+        if (r.sz_high && in_range(r.off_high, r.sz_high, mp.data_sz) && r.g_high == 8)
         {
-            const uint8_t* hb = mp.data.data() + r.off_high;
+            auto data_high = readStreamData(mp.f, r.sz_high, mp.data_offset + r.off_high);
+            const uint8_t* hb = data_high.data();
+            
             __half* d_high = dequant_try_Q8_0(hb, (size_t)r.sz_high, n);
             if (d_high)
             {
                 reduce(d_high, d_truth, n, s_high, n_high, m_high);
                 cudaFree(d_high);
                 validated_high++;
+                std::cout << "Tensor name for INT8_0: " << validated_high << ", " << r.name << "\n";
             }
             else if (report)
             {
@@ -864,15 +908,17 @@ int main(int argc, char** argv)
         }
 
         // LOW (legacy scalar 2-bit only; Q2_K/IQ2_* skipped)
-        if (r.sz_low && in_range(r.off_low, r.sz_low, mp.data.size()) && r.g_low == 10)
+        if (r.sz_low && in_range(r.off_low, r.sz_low, mp.data_sz) && r.g_low == 10)
         {
-            const uint8_t* lb = mp.data.data() + r.off_low;
+            auto data_low = readStreamData(mp.f, r.sz_low, mp.data_offset + r.off_low);
+            const uint8_t* lb = data_low.data();
             __half* d_low = dequant_try_Q2_K(lb, (size_t)r.sz_low, n);
             if (d_low)
             {
                 reduce(d_low, d_truth, n, s_low, n_low, m_low);
                 cudaFree(d_low);
                 validated_low++;
+                std::cout << "Tensor name for INT2_K: " << validated_low << ", " << r.name << "\n";
             }
             else if (report)
                 std::cerr << "NOTE: skipping LOW dequant (likely Q2_K / IQ2_*): " << r.name << "\n";

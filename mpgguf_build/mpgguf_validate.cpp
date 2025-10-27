@@ -271,6 +271,63 @@ static inline bool aligned64(uint64_t x)
     return (x & 63ull) == 0ull;
 }
 
+static std::vector<uint8_t> readStreamData2(std::ifstream & f, size_t sz, size_t offset)
+{
+    // Create a vector of the requested size.
+    std::vector<uint8_t> buffer(sz);
+
+    f.seekg((std::streampos)offset);
+
+    // Read the data directly into the vector's underlying storage.
+    f.read(reinterpret_cast<char*>(buffer.data()), sz);
+
+    // Check how many bytes were actually read.
+    size_t bytes_read = f.gcount();
+
+    // Resize the vector to the number of bytes actually read.
+    if (bytes_read < sz) {
+        buffer.resize(bytes_read);
+    }
+
+    return buffer; // Return the vector by value (using move semantics).
+};
+
+static std::vector<uint8_t> readStreamData(std::ifstream& f, size_t sz, size_t offset) {
+    std::vector<uint8_t> out;
+
+    if (!f.good()) return out;
+
+    // 1) Clear any eof/fail from prior ops; required before seekg on some FUSE filesystems.
+    f.clear();
+
+    // 2) Find file size.
+    std::istream::pos_type cur = f.tellg();
+    f.seekg(0, std::ios::end);
+    std::istream::pos_type end = f.tellg();
+    if (end <= 0) { f.clear(); return out; }
+    const size_t file_size = static_cast<size_t>(end);
+
+    // 3) Validate and clamp request.
+    if (offset >= file_size) { f.clear(); return out; }
+    const size_t to_read = std::min(sz, file_size - offset);
+
+    // 4) Seek to absolute offset from beginning.
+    f.clear(); // (again, in case tellg/setg flipped eof)
+    f.seekg(static_cast<std::streamoff>(offset), std::ios::beg);
+    if (!f.good()) { f.clear(); return out; }
+
+    // 5) Read with partial-read handling.
+    out.resize(to_read);
+    f.read(reinterpret_cast<char*>(out.data()), static_cast<std::streamsize>(to_read));
+    const auto got = static_cast<size_t>(f.gcount());
+    if (got < to_read) {
+        out.resize(got);
+        // Reset state so later calls can still seek/read.
+        f.clear();
+    }
+    return out;
+}
+
 static uint64_t align_up(uint64_t off, uint32_t align) 
 {
     const uint64_t mask = static_cast<uint64_t>(align) - 1u;
@@ -326,16 +383,28 @@ struct Rec {
 struct MP {
     std::vector<Rec>     recs;
     std::vector<uint8_t> kv;
-    std::vector<uint8_t> data;
+    std::ifstream        f;
+    size_t               data_offset;
+    size_t               data_sz;
+
+    bool Open(const std::string& path)
+    {
+        f.open(path, std::ios::binary);
+        if (!f.is_open()) {
+            return false;
+        }
+
+        return true;
+    }
 };
 
-bool load_mp(const std::string & path, MP & out) {
-    std::ifstream f(path, std::ios::binary);
-    if (!f) {
-        std::cerr << "open failed: " << path << "\n";
+bool load_mp(const std::string & path, MP & out) 
+{
+    
+    if (out.Open(path) == false)
         return false;
-    }
 
+    auto& f = out.f;
     // Header
     char mg[7];
     f.read(mg, 7);
@@ -446,32 +515,14 @@ bool load_mp(const std::string & path, MP & out) {
     // 5. Seek back to the current position
     f.seekg(current_pos);
     
-    // 6. Allocate and read
-    out.data.resize(remaining_size);
-    f.read((char *)& out.data[0], remaining_size);
+    out.data_offset = (size_t)current_pos;
+    out.data_sz = (size_t)remaining_size;
 
-    //out.data.assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
-    const size_t D = out.data.size();
-
-    // Range checks
-    for (const auto & r : out.recs) {
-        if (r.sz_low && !in_range(r.off_low, r.sz_low, D)) {
-            std::cerr << "ERROR: LOW slice OOB for " << r.name << "\n";
-            return false;
-        }
-        if (r.sz_high && !in_range(r.off_high, r.sz_high, D)) {
-            std::cerr << "ERROR: HIGH slice OOB for " << r.name << "\n";
-            return false;
-        }
-        if (r.sz_fp && !in_range(r.off_fp, r.sz_fp, D)) {
-            std::cerr << "ERROR: FP slice OOB for " << r.name << "\n";
-            return false;
-        }
-    }
     return true;
 }
 
-static std::string rd_s(std::istream & f) {
+static std::string rd_s(std::istream & f) 
+{
     uint64_t n = 0;
     f.read((char *) &n, 8);
     const uint64_t kMaxStr = 4096ull * 1024ull;
@@ -544,6 +595,7 @@ static void skipv(std::istream & f) {
 }
 
 struct GRec {
+    size_t                splitId;
     std::string           name;
     uint32_t              nd;
     std::vector<uint64_t> dims;
@@ -553,27 +605,39 @@ struct GRec {
 
 struct GG {
     std::vector<GRec>    recs;
-    std::vector<uint8_t> whole;
+    std::ifstream f;
+
+    bool Open(const std::string& path) 
+    {
+        f.open(path, std::ios::binary);
+        if (!f.is_open()) {
+            return false;
+        }
+
+        return true;
+    }
 };
 
-bool load_fp(const std::string & path, GG & out) {
-    std::ifstream f(path, std::ios::binary);
-    if (!f) {
+bool load_fp(const size_t splitId, const std::string & path, GG & out) 
+{
+
+    if (!out.Open(path)) 
+    {
         std::cerr << "open failed: " << path << "\n";
         return false;
     }
 
     char mg[4];
-    f.read(mg, 4);
+    out.f.read(mg, 4);
     if (std::string(mg, 4) != "GGUF") {
         std::cerr << "not GGUF: " << path << "\n";
         return false;
     }
     uint32_t ver = 0;
-    f.read((char *) &ver, 4);
+    out.f.read((char *) &ver, 4);
     uint64_t n_t = 0, n_kv = 0;
-    f.read((char *) &n_t, 8);
-    f.read((char *) &n_kv, 8);
+    out.f.read((char *) &n_t, 8);
+    out.f.read((char *) &n_kv, 8);
 
     const uint64_t kMaxKV = 200000, kMaxT = 200000;
     if (n_kv == 0 || n_kv > kMaxKV) {
@@ -588,8 +652,8 @@ bool load_fp(const std::string & path, GG & out) {
     // Skip KV
     try {
         for (uint64_t i = 0; i < n_kv; i++) {
-            (void) rd_s(f);
-            skipv(f);
+            (void) rd_s(out.f);
+            skipv(out.f);
         }
     } catch (const std::exception & e) {
         std::cerr << "WARN: KV skip failed: " << e.what() << ", continuing\n";
@@ -599,14 +663,14 @@ bool load_fp(const std::string & path, GG & out) {
     std::vector<GRec> recs;
     recs.reserve((size_t) n_t);
     for (uint64_t i = 0; i < n_t; i++) {
-        std::string name = rd_s(f);
+        std::string name = rd_s(out.f);
         if (!is_ascii_identifier(name)) {
             std::cerr << "ERROR: bad tensor name " << name << "\n";
             return false;
         }
 
         uint32_t nd = 0;
-        f.read((char *) &nd, 4);
+        out.f.read((char *) &nd, 4);
         if (nd == 0 || nd > 6) {
             std::cerr << "ERROR: bad nd=" << nd << " for " << name << "\n";
             return false;
@@ -614,7 +678,7 @@ bool load_fp(const std::string & path, GG & out) {
 
         std::vector<uint64_t> dims(nd);
         for (uint32_t d = 0; d < nd; ++d) {
-            f.read((char *) &dims[d], 8);
+            out.f.read((char *) &dims[d], 8);
             if (dims[d] == 0 || dims[d] > (uint64_t) 1e10) {
                 std::cerr << "ERROR: bad dim[" << d << "]=" << dims[d] << " for " << name << "\n";
                 return false;
@@ -622,24 +686,24 @@ bool load_fp(const std::string & path, GG & out) {
         }
 
         uint32_t g = 0;
-        f.read((char *) &g, 4);
+        out.f.read((char *) &g, 4);
         uint64_t off = 0;
-        f.read((char *) &off, 8);
+        out.f.read((char *) &off, 8);
         if (!aligned32(off)) {
             std::cerr << "ERROR: tensor data offset not 32B aligned for " << name << "\n";
             return false;
         }
 
-        recs.push_back({ std::move(name), nd, std::move(dims), g, off, 0 });
+        recs.push_back({ splitId, std::move(name), nd, std::move(dims), g, off, 0 });
     }
 
     // 4) Remember the start of the data block
-    uint64_t data_block_start = static_cast<uint64_t>(f.tellg());
+    uint64_t data_block_start = static_cast<uint64_t>(out.f.tellg());
     data_block_start = align_up(data_block_start, 32);
 
     // Sizes by next off / EOF
-    f.seekg(0, std::ios::end);
-    size_t fsz = (size_t) f.tellg();
+    out.f.seekg(0, std::ios::end);
+    size_t fsz = (size_t)out.f.tellg();
 
     std::vector<GRec *> ord;
     ord.reserve(recs.size());
@@ -660,19 +724,12 @@ bool load_fp(const std::string & path, GG & out) {
         r.off += data_block_start;
 
     // Whole file
-    f.seekg(0, std::ios::end);
-    std::streampos file_size = f.tellg();
-    f.seekg(0, std::ios::beg);
-
-    out.whole.resize(static_cast<size_t>(file_size));  // Allocate exact size
-
-    f.read(reinterpret_cast<char *>(out.whole.data()), file_size);  // Read directly into buffer
     out.recs = std::move(recs);
+    out.f.seekg(0, std::ios::beg);
     return true;
 }
 
 // ---------- Dequantizers (CPU) ----------
-static const int8_t LUT2[4] = { -2, -1, 0, 1 };
 
 // Dequantizes Q8_0 payload (blocks × [float scale][int8 × QK]) into half
 static std::vector<float> deq_q8_to_f16(const uint8_t * bytes, size_t sz, size_t n_elems) 
@@ -684,7 +741,8 @@ static std::vector<float> deq_q8_to_f16(const uint8_t * bytes, size_t sz, size_t
     }
     std::vector<float> out(n_elems);
     const uint8_t *  p = bytes;
-    for (int b = 0; b < blocks; ++b) {
+    for (int b = 0; b < blocks; ++b) 
+    {
         
         uint16_t bits;
         std::memcpy(&bits, p, 2);
@@ -819,7 +877,7 @@ static std::vector<bf16> f32_to_f16(const float * x, size_t n) {
 
 // ---------- Main ----------
 int main(int argc, char ** argv) {
-    std::string pmp, pfp;
+    std::string pmp;
     //bool        report = false, diffHL = false;
 
     //for (int i = 1; i < argc; i++) {
@@ -840,31 +898,38 @@ int main(int argc, char ** argv) {
 
     bool report = true, diffHL = true;
     //pmp = "Qwen3-1.7B.mpgguf";
-    //pfp = "Qwen3-1.7B-BF16.gguf";
+    //std::vector<std::string> pfps = { "Qwen3-1.7B-BF16.gguf" };
 
     pmp = "Qwen3-30B-A3B.mpgguf";
-    pfp = "Qwen3-1.7B-BF16.gguf";
-
-    if (pmp.empty() || pfp.empty()) {
-        std::cerr << "Missing --mpgguf or --fp16\n";
-        return 1;
-    }
+    std::vector<std::string> pfps = { "Qwen3-30B-A3B-BF16-00001-of-00002.gguf", "Qwen3-30B-A3B-BF16-00002-of-00002.gguf" };
 
     MP mp;
-    if (!load_mp(pmp, mp)) {
+    if (!load_mp(pmp, mp)) 
+    {
         std::cerr << "bad mpgguf\n";
         return 1;
     }
-    GG gg;
-    if (!load_fp(pfp, gg)) {
-        std::cerr << "bad gguf baseline\n";
-        return 1;
+    std::vector<GG> ggs;
+    ggs.resize(pfps.size());
+
+    for (size_t i = 0; i < pfps.size(); i++)
+    {
+        if (!load_fp(i, pfps[i], ggs[i])) 
+        {
+            std::cerr << "bad gguf baseline\n";
+            return 1;
+        }
     }
 
     // Map baseline by name
     std::unordered_map<std::string, GRec *> truth;
-    for (auto & r : gg.recs) {
-        truth[r.name] = &r;
+
+    for (auto& gg:ggs)
+    {
+        for (auto& r : gg.recs) 
+        {
+            truth[r.name] = &r;
+        }
     }
 
     auto N = [](const std::vector<uint64_t> & d) -> size_t {
@@ -882,7 +947,8 @@ int main(int argc, char ** argv) {
                       long double & Nacc, float & m) {
         long double ss = 0;
         float       mx = 0;
-        for (size_t i = 0; i < n; i++) {
+        for (size_t i = 0; i < n; i++) 
+        {
             float da = (float) A[i];
             float db = (float) B[i];
             float d  = da - db;
@@ -930,19 +996,23 @@ int main(int argc, char ** argv) {
 
         // Build FP16 truth (accept FP16 or FP32 tensor payloads)
         std::vector<bf16> h_truth2(n, bf16(float(0.0)));
-        const uint8_t *  tb = gg.whole.data() + tr.off;
-        if (tr.g == 30) {
+        auto stream_data = readStreamData(ggs[tr.splitId].f, n * sizeof(size_t), tr.off);
+        const uint8_t* tb = stream_data.data();
+        if (tr.g == 30) 
+        {
             // baseline FP16
             for (size_t i = 0; i < n; i++) {
                 uint16_t bits;
                 std::memcpy(&bits, tb + i * 2, 2);
                 h_truth2[i] = bf16(bits);
             }
-        } else if (tr.g == 0) {
+        } else if (tr.g == 0) 
+        {
             // baseline FP32
             const float * fp = reinterpret_cast<const float *>(tb);
             h_truth2          = f32_to_f16(fp, n);
-        } else {
+        } else 
+        {
             // Unknown baseline tensor type; treat as zeros (warn if report)
             if (report) {
                 std::cerr << "WARN: baseline tensor " << r.name << " not FP16/FP32, treated as zeros\n";
@@ -952,32 +1022,36 @@ int main(int argc, char ** argv) {
         std::vector<float> f32_truths2;
         f32_truths2.reserve(h_truth2.size());
         for (size_t i = 0; i < h_truth2.size(); i++)
-        {
             f32_truths2.push_back(h_truth2[i].operator float());
-        }
 
         // LOW (legacy scalar 2-bit only)
-        if (r.sz_low && in_range(r.off_low, r.sz_low, mp.data.size()) && r.g_low == 10)
+        if (r.sz_low && in_range(r.off_low, r.sz_low, mp.data_sz) && r.g_low == 10)
         {
-            const uint8_t * lb    = mp.data.data() + r.off_low;
+            auto data_low = readStreamData(mp.f, r.sz_low, mp.data_offset + r.off_low);
+            const uint8_t* lb = data_low.data();
             auto            d_low = deq_q2_k_to_f16(lb, (size_t) r.sz_low, n);
-            if (!d_low.empty()) {
+            if (!d_low.empty()) 
+            {
                 reduce(d_low, f32_truths2, n, s_low, n_low, m_low);
                 validated_low++;
+
+                std::cout << "Tensor name for INT2_K: " << validated_low << ", " << r.name << "\n";
             } else if (report) {
                 std::cerr << "NOTE: skipping LOW dequant (likely Q2_K / IQ2_*): " << r.name << "\n";
             }
         }
 
         // HIGH (Q8_0 expected)
-        if (r.sz_high && in_range(r.off_high, r.sz_high, mp.data.size()) && r.g_high == 8)
+        if (r.sz_high && in_range(r.off_high, r.sz_high, mp.data_sz) && r.g_high == 8)
         {
-            const uint8_t* hb = mp.data.data() + r.off_high;
+            auto data_high = readStreamData(mp.f, r.sz_high, mp.data_offset + r.off_high);
+            const uint8_t* hb = data_high.data();
             //auto            d_high = dequant_try(hb, (size_t) r.sz_high, n);
             auto            d_high = deq_q8_to_f16(hb, (size_t)r.sz_high, n);
             if (!d_high.empty()) {
                 reduce(d_high, f32_truths2, n, s_high, n_high, m_high);
                 validated_high++;
+                std::cout << "Tensor name for INT8_0: " << validated_high << ", " << r.name << "\n";
             }
             else if (report) {
                 std::cerr << "WARN: unrecognized HIGH payload for " << r.name << "\n";
