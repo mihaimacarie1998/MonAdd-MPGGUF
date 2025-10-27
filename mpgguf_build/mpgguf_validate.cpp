@@ -34,12 +34,247 @@
 // https://www.abhik.xyz/articles/ggml-structure
 // 
 // ---------- helpers ----------
-static inline bool aligned32(uint64_t x) {
+
+// ---------- GGUF baseline reader (tolerant KV skipper) ----------
+enum {
+    GGUF_U8 = 0,
+    GGUF_I8 = 1,
+    GGUF_U16 = 2,
+    GGUF_I16 = 3,
+    GGUF_U32 = 4,
+    GGUF_I32 = 5,
+    GGUF_F32 = 6,
+    GGUF_BOOL = 7,
+    GGUF_STRING = 8,
+    GGUF_ARRAY = 9,
+    GGUF_U64 = 10,
+    GGUF_I64 = 11,
+    GGUF_F64 = 12,
+    GGUF_BYTES = 13
+};
+
+static int scalar_size(int t) {
+    switch (t) {
+    case GGUF_U8:
+    case GGUF_I8:
+    case GGUF_BOOL:
+        return 1;
+    case GGUF_U16:
+    case GGUF_I16:
+        return 2;
+    case GGUF_U32:
+    case GGUF_I32:
+    case GGUF_F32:
+        return 4;
+    case GGUF_U64:
+    case GGUF_I64:
+    case GGUF_F64:
+        return 8;
+    default:
+        return -1;
+    }
+}
+
+enum
+{
+    F32 = 0,
+    F16 = 1,
+    Q4_0 = 2,
+    Q4_1 = 3,
+    Q5_0 = 6,
+    Q5_1 = 7,
+    Q8_0 = 8,
+    Q8_1 = 9,
+    Q2_K = 10,
+    Q3_K = 11,
+    Q4_K = 12,
+    Q5_K = 13,
+    Q6_K = 14,
+    Q8_K = 15,
+    IQ2_XXS = 16,
+    IQ2_XS = 17,
+    IQ3_XXS = 18,
+    IQ1_S = 19,
+    IQ4_NL = 20,
+    IQ3_S = 21,
+    IQ2_S = 22,
+    IQ4_XS = 23,
+    I8 = 24,
+    I16 = 25,
+    I32 = 26,
+    I64 = 27,
+    F64 = 28,
+    IQ1_M = 29,
+    BF16 = 30,
+    TQ1_0 = 34,
+    TQ2_0 = 35,
+    MXFP4 = 39
+};
+
+struct bf16
+{
+    uint16_t bits;
+
+    bf16() : bits(0) {}
+    bf16(uint16_t f) : bits(f) {}
+    bf16(float f) { bits = float_to_half(f); }
+    operator float() const { return half_to_float(bits); }
+
+    static uint16_t float_to_half(float f) 
+    {
+        uint32_t x;
+        std::memcpy(&x, &f, sizeof(x));
+        // Round to nearest even
+        uint32_t lsb = (x >> 16) & 1;
+        uint32_t rounding_bias = 0x7FFF + lsb;
+        x += rounding_bias;
+        return static_cast<uint16_t>(x >> 16);
+    }
+
+    static float half_to_float(uint16_t h) 
+    {
+        uint32_t x = static_cast<uint32_t>(h) << 16;
+        float f;
+        std::memcpy(&f, &x, sizeof(f));
+        return f;
+    }
+};
+
+/// --- Simple FP16 type (IEEE 754 half) ---
+struct half 
+{
+    uint16_t bits;
+
+    half() : bits(0) {}
+    half(uint16_t f) : bits(f) {}
+    half(float f) { bits = float_to_half(f); }
+    operator float() const { return half_to_float(bits); }
+
+    static uint16_t float_to_half(float f) 
+    {
+        uint32_t x = *reinterpret_cast<uint32_t*>(&f);
+        uint16_t sign = (x >> 16) & 0x8000;
+        uint32_t mantissa = x & 0x7fffff;
+        int32_t exp = ((x >> 23) & 0xff) - 127 + 15;
+        if (exp <= 0) {
+            if (exp < -10) return sign;
+            mantissa = (mantissa | 0x800000) >> (1 - exp);
+            return sign | (mantissa + 0x1000) >> 13;
+        }
+        else if (exp >= 31) {
+            return sign | 0x7c00;
+        }
+        return sign | (exp << 10) | ((mantissa + 0x1000) >> 13);
+    }
+
+    static float half_to_float(uint16_t h) 
+    {
+        uint32_t sign = static_cast<uint32_t>((h >> 15) & 0x1u);
+        uint32_t exp = static_cast<uint32_t>((h >> 10) & 0x1Fu);
+        uint32_t mantissa = static_cast<uint32_t>(h & 0x3FFu);
+
+        uint32_t f; // float32 bit pattern
+
+        if (exp == 0) {
+            if (mantissa == 0) {
+                // +/- 0.0
+                f = (sign << 31);
+            }
+            else {
+                // Subnormal half: normalize mantissa
+                uint32_t e = 1; // effective exponent for half subnormals starts at 1
+                while ((mantissa & 0x400u) == 0u) { // until leading 1 appears at bit 10
+                    mantissa <<= 1;
+                    --e;
+                }
+                mantissa &= 0x3FFu; // drop the leading 1
+                // Convert exponent bias: (e - 1) + (127 - 15)
+                uint32_t exp32 = static_cast<uint32_t>(static_cast<int32_t>(e) - 1 + 127 - 15);
+                f = (sign << 31) | (exp32 << 23) | (mantissa << 13);
+            }
+        }
+        else if (exp == 0x1Fu) {
+            // Inf / NaN
+            f = (sign << 31) | 0x7F800000u | (mantissa << 13);
+        }
+        else {
+            // Normalized
+            uint32_t exp32 = exp + (127 - 15);
+            f = (sign << 31) | (exp32 << 23) | (mantissa << 13);
+        }
+
+        float out;
+        std::memcpy(&out, &f, sizeof(out));
+        return out;
+    }
+};
+
+/// --- Half16 vector (CPU equivalent of __half16) ---
+struct half16
+{
+    half data[16];
+
+    half16() { for (auto& x : data) x = half(0.0f); }
+
+    explicit half16(float val) {
+        for (auto& x : data) x = half(val);
+    }
+
+    explicit half16(const float* vals) {
+        for (int i = 0; i < 16; ++i)
+            data[i] = half(vals[i]);
+    }
+
+    float get(int i) const { return static_cast<float>(data[i]); }
+    void set(int i, float val) { data[i] = half(val); }
+
+    half& operator[](int i) { return data[i]; }
+    const half& operator[](int i) const { return data[i]; }
+
+    // --- Basic arithmetic operations ---
+    half16 operator+(const half16& other) const {
+        half16 result;
+        for (int i = 0; i < 16; ++i)
+            result.data[i] = half(static_cast<float>(data[i]) + static_cast<float>(other.data[i]));
+        return result;
+    }
+
+    half16 operator-(const half16& other) const {
+        half16 result;
+        for (int i = 0; i < 16; ++i)
+            result.data[i] = half(static_cast<float>(data[i]) - static_cast<float>(other.data[i]));
+        return result;
+    }
+
+    half16 operator*(const half16& other) const {
+        half16 result;
+        for (int i = 0; i < 16; ++i)
+            result.data[i] = half(static_cast<float>(data[i]) * static_cast<float>(other.data[i]));
+        return result;
+    }
+
+    half16 operator/(const half16& other) const {
+        half16 result;
+        for (int i = 0; i < 16; ++i)
+            result.data[i] = half(static_cast<float>(data[i]) / static_cast<float>(other.data[i]));
+        return result;
+    }
+};
+
+static inline bool aligned32(uint64_t x) 
+{
     return (x & 31ull) == 0ull;
 }
 
-static inline bool aligned64(uint64_t x) {
+static inline bool aligned64(uint64_t x) 
+{
     return (x & 63ull) == 0ull;
+}
+
+static uint64_t align_up(uint64_t off, uint32_t align) 
+{
+    const uint64_t mask = static_cast<uint64_t>(align) - 1u;
+    return (off + mask) & ~mask;
 }
 
 static inline bool is_ascii_identifier(const std::string & s) {
@@ -78,100 +313,6 @@ static size_t numel(const std::vector<uint64_t> & d) {
     }
     return n;
 }
-
-// ---------- minimal half (IEEE 754 binary16) converter ----------
-struct h16 {
-    uint16_t bits;
-
-    h16() : bits(0) {}
-
-    explicit h16(uint16_t b) : bits(b) {}
-
-    explicit h16(float f) { bits = float_to_half(f); }
-
-    operator float() const { return half_to_float(bits); }
-
-    static uint16_t float_to_half(float f) {
-        // Reference: fast float->half via bit ops; handles NaN/Inf/denorm reasonably
-        union {
-            uint32_t u;
-            float    f;
-        } v = { 0 };
-
-        v.f           = f;
-        uint32_t x    = v.u;
-        uint32_t sign = (x >> 31) & 0x1;
-        int32_t  exp  = int32_t((x >> 23) & 0xFF) - 127 + 15;  // rebias
-        uint32_t mant = x & 0x7FFFFF;
-
-        if ((x & 0x7FFFFFFF) == 0) {
-            return (uint16_t) (sign << 15);    // zero
-        }
-        if ((x & 0x7F800000) == 0x7F800000) {  // Inf/NaN
-            uint16_t infnan = (uint16_t) ((sign << 15) | (0x1F << 10));
-            if (mant) {
-                return (uint16_t) (infnan | (mant ? 0x200 : 0));  // qNaN
-            }
-            return infnan;                                        // Inf
-        }
-        if (exp <= 0) {
-            // Subnormal in half
-            if (exp < -10) {
-                return (uint16_t) (sign << 15);  // underflow -> zero
-            }
-            mant |= 0x800000;                    // hidden 1
-            int      shift = 14 - exp;
-            uint16_t frac  = (uint16_t) (mant >> (shift + 13));
-            // round
-            if ((mant >> (shift + 12)) & 1) {
-                frac += 1;
-            }
-            return (uint16_t) ((sign << 15) | frac);
-        } else if (exp >= 31) {
-            // overflow -> Inf
-            return (uint16_t) ((sign << 15) | (0x1F << 10));
-        } else {
-            uint16_t frac = (uint16_t) (mant >> 13);
-            // round to nearest even
-            if (mant & 0x1000) {
-                frac++;
-                if (frac == 0x400) {  // carry out
-                    frac = 0;
-                    exp += 1;
-                    if (exp >= 31) {
-                        return (uint16_t) ((sign << 15) | (0x1F << 10));
-                    }
-                }
-            }
-            return (uint16_t) ((sign << 15) | (uint16_t(exp) << 10) | (frac & 0x3FF));
-        }
-    }
-
-    static float half_to_float(uint16_t h) {
-        // A simplified approximation for demonstration.
-        uint16_t sign = (h >> 15);
-        uint16_t exp  = (h >> 10) & 0x1f;
-        uint16_t man  = (h & 0x3ff);
-
-        float f = 0.0f;
-        if (exp == 0) {
-            // Subnormal
-            f = (man / 1024.0f) * pow(2.0f, -14.0f);
-        } else if (exp == 31) {
-            // Infinity or NaN
-            f = (man == 0) ? INFINITY : NAN;
-        } else {
-            // Normal
-            f = pow(2.0f, (float) (exp - 15)) * (1.0f + (float) man / 1024.0f);
-        }
-
-        if (sign) {
-            f = -f;
-        }
-
-        return f;
-    }
-};
 
 // ---------- MPGGUF v2 reader ----------
 struct Rec {
@@ -291,6 +432,7 @@ bool load_mp(const std::string & path, MP & out) {
     // Data region
     // 1. Get the current position
     std::streampos current_pos = f.tellg();
+    current_pos = align_up(current_pos, 64);
 
     // 2. Seek to the end
     f.seekg(0, std::ios::end);
@@ -303,7 +445,7 @@ bool load_mp(const std::string & path, MP & out) {
 
     // 5. Seek back to the current position
     f.seekg(current_pos);
-
+    
     // 6. Allocate and read
     out.data.resize(remaining_size);
     f.read((char *)& out.data[0], remaining_size);
@@ -327,46 +469,6 @@ bool load_mp(const std::string & path, MP & out) {
         }
     }
     return true;
-}
-
-// ---------- GGUF baseline reader (tolerant KV skipper) ----------
-enum {
-    GGUF_U8     = 0,
-    GGUF_I8     = 1,
-    GGUF_U16    = 2,
-    GGUF_I16    = 3,
-    GGUF_U32    = 4,
-    GGUF_I32    = 5,
-    GGUF_F32    = 6,
-    GGUF_BOOL   = 7,
-    GGUF_STRING = 8,
-    GGUF_ARRAY  = 9,
-    GGUF_U64    = 10,
-    GGUF_I64    = 11,
-    GGUF_F64    = 12,
-    GGUF_BYTES  = 13
-};
-
-static int scalar_size(int t) {
-    switch (t) {
-        case GGUF_U8:
-        case GGUF_I8:
-        case GGUF_BOOL:
-            return 1;
-        case GGUF_U16:
-        case GGUF_I16:
-            return 2;
-        case GGUF_U32:
-        case GGUF_I32:
-        case GGUF_F32:
-            return 4;
-        case GGUF_U64:
-        case GGUF_I64:
-        case GGUF_F64:
-            return 8;
-        default:
-            return -1;
-    }
 }
 
 static std::string rd_s(std::istream & f) {
@@ -531,6 +633,10 @@ bool load_fp(const std::string & path, GG & out) {
         recs.push_back({ std::move(name), nd, std::move(dims), g, off, 0 });
     }
 
+    // 4) Remember the start of the data block
+    uint64_t data_block_start = static_cast<uint64_t>(f.tellg());
+    data_block_start = align_up(data_block_start, 32);
+
     // Sizes by next off / EOF
     f.seekg(0, std::ios::end);
     size_t fsz = (size_t) f.tellg();
@@ -550,6 +656,9 @@ bool load_fp(const std::string & path, GG & out) {
         ord[i]->sz = nxt - ord[i]->off;
     }
 
+    for (auto& r : recs)
+        r.off += data_block_start;
+
     // Whole file
     f.seekg(0, std::ios::end);
     std::streampos file_size = f.tellg();
@@ -566,7 +675,8 @@ bool load_fp(const std::string & path, GG & out) {
 static const int8_t LUT2[4] = { -2, -1, 0, 1 };
 
 // Dequantizes Q8_0 payload (blocks × [float scale][int8 × QK]) into half
-static std::vector<float> deq_q8_to_f16(const uint8_t * bytes, size_t sz, size_t n_elems) {
+static std::vector<float> deq_q8_to_f16(const uint8_t * bytes, size_t sz, size_t n_elems) 
+{
     const int blocks = int((n_elems + QK - 1) / QK);
     size_t    expect = size_t(blocks) * (2 + QK);
     if (sz != expect) {
@@ -578,7 +688,11 @@ static std::vector<float> deq_q8_to_f16(const uint8_t * bytes, size_t sz, size_t
         
         uint16_t bits;
         std::memcpy(&bits, p, 2);
-        float d = h16::half_to_float(bits);
+
+        uint16_t h = static_cast<uint16_t>(p[0])
+            | static_cast<uint16_t>(p[1]) << 8;
+
+        float d = half::half_to_float(bits);
 
         if (isinf(d) || isnan(d))
             d = 0.0;
@@ -604,78 +718,72 @@ static std::vector<float> deq_q8_to_f16(const uint8_t * bytes, size_t sz, size_t
 
 // Q2_K → f16. Assumes bytes points to the raw tensor payload (no padding).
 // Returns empty vector on size mismatch.
-static std::vector<float> deq_q2_k_to_f16(const uint8_t * bytes, size_t sz, size_t n_elems) {
-    if (!bytes || n_elems == 0) {
-        return {};
+std::vector<float> deq_q2_k_to_f16(const uint8_t* bytes,
+    size_t sz,
+    size_t n_elems,
+    int QK_K = 256) {
+    if (QK_K % 16 != 0) {
+        throw std::invalid_argument("QK_K must be divisible by 16");
+    }
+    if (n_elems % static_cast<size_t>(QK_K) != 0) {
+        throw std::invalid_argument("n_elems must be a multiple of QK_K");
     }
 
-    constexpr int    QK_K            = 256;  // super-block size
-    constexpr size_t BYTES_PER_BLOCK = 84;   // 2*fp16 (4) + scales(16) + qs(64)
+    const size_t n_blocks = n_elems / static_cast<size_t>(QK_K);
+    const size_t scales_sz = static_cast<size_t>(QK_K) / 16; // one byte per 16 values
+    const size_t qs_sz = static_cast<size_t>(QK_K) / 4;  // 2 bits/value
+    const size_t per_block = scales_sz + qs_sz + 4;          // +2 bytes d +2 bytes dmin
 
-    auto ceil_div = [](size_t a, size_t b) {
-        return (a + b - 1) / b;
-    };
-    const int blocks = (int) ceil_div(n_elems, (size_t) QK_K);
-    if (sz != (size_t) blocks * BYTES_PER_BLOCK) {
-        // Not a raw Q2_K payload (or you didn't pass just the payload bytes).
-        return {};
+    const size_t expected_sz = n_blocks * per_block;
+    if (sz < expected_sz) {
+        throw std::invalid_argument("Input byte buffer is too small for the given n_elems/QK_K layout");
     }
 
     std::vector<float> out(n_elems);
-    const uint8_t *  p = bytes;
 
-    for (int b = 0; b < blocks; ++b) {
-        // read super-block d, dmin (fp16 little-endian)
-        uint16_t d16, dmin16;
-        std::memcpy(&d16, p, 2);
-        p += 2;
-        std::memcpy(&dmin16, p, 2);
-        p += 2;
+    const uint8_t* p = bytes;
 
-        const float d    = h16::half_to_float(d16);  // implement or use your fp16 helper
-        const float dmin = h16::half_to_float(dmin16);
+    for (size_t b = 0; b < n_blocks; ++b) {
+        const uint8_t* scales = p;                 // length scales_sz
+        const uint8_t* qs = p + scales_sz;     // length qs_sz
+        const uint8_t* tail = qs + qs_sz;        // 4 bytes: d (2), dmin (2)
 
-        // scales + mins packed (16 bytes, 1 byte per 16-elem sub-block)
-        const uint8_t * scales = p;
-        p += 16;
+        // read fp16 values
+        uint16_t d_bits = static_cast<uint16_t>(tail[0] | (tail[1] << 8));
+        uint16_t dm_bits = static_cast<uint16_t>(tail[2] | (tail[3] << 8));
+        float d = half::half_to_float(d_bits);
+        float dmin = half::half_to_float(dm_bits);
 
-        // 2-bit quants for 256 weights (64 bytes)
-        const uint8_t * qs = p;
-        p += 64;
+        // For each group of 16 values
+        // Each group consumes 1 scale byte and 4 data bytes (16 * 2 bits)
+        const size_t groups = static_cast<size_t>(QK_K) / 16;
+        const size_t block_out_base = b * static_cast<size_t>(QK_K);
 
-        const size_t base        = (size_t) b * QK_K;
-        const int    block_elems = (int) std::min<size_t>(QK_K, n_elems - base);
+        for (size_t g = 0; g < groups; ++g) {
+            const uint8_t s = scales[g];
+            const float dl = d * static_cast<float>(s & 0x0F);
+            const float ml = dmin * static_cast<float>(s >> 4);
 
-        // process 16 sub-blocks × 16 weights
-        for (int sb = 0; sb < 16; ++sb) {
-            const uint8_t sm    = scales[sb];
-            float   scale = d * float(sm & 0x0F);            // low nibble = scale (4b)
-            float   minv  = dmin * float((sm >> 4) & 0x0F);  // high nibble = min   (4b)
+            // 4 bytes for 16 2-bit values
+            const uint8_t b0 = qs[g * 4 + 0];
+            const uint8_t b1 = qs[g * 4 + 1];
+            const uint8_t b2 = qs[g * 4 + 2];
+            const uint8_t b3 = qs[g * 4 + 3];
 
-            if (isnan(scale) || isinf(scale))
-                scale = 0.0;
-
-            if (isnan(minv) || isinf(minv))
-                minv = 0.0;
-
-            const int sb_base = sb * 16;
-            for (int j = 0; j < 16; ++j) {
-                const int i = sb_base + j;
-                if (i >= block_elems) {
-                    break;
-                }
-
-                // unpack 2-bit code: 4 codes per byte
-                const int     qi    = i;
-                const uint8_t byte  = qs[qi >> 2];            // /4
-                const uint8_t shift = (qi & 3) * 2;           // %4 *2
-                const uint8_t q     = (byte >> shift) & 0x3;  // 0..3
-
-                const float w = scale * float(q) + minv;
-                out[base + i] = w;
+            // unpack in order: each byte holds 4 values (bits 0-1,2-3,4-5,6-7)
+            const uint8_t pack[4] = { b0, b1, b2, b3 };
+            for (size_t i = 0; i < 16; ++i) {
+                const uint8_t byte = pack[i >> 2];          // i/4
+                const uint8_t shift = static_cast<uint8_t>((i & 3) * 2); // (i%4)*2
+                const uint8_t q2 = static_cast<uint8_t>((byte >> shift) & 0x3u);
+                const float val = dl * static_cast<float>(q2) - ml;
+                out[block_out_base + g * 16 + i] = val;
             }
         }
+
+        p += per_block;
     }
+
     return out;
 }
 
@@ -701,10 +809,10 @@ static std::vector<float> dequant_try(const uint8_t * bytes, size_t sz, size_t n
 }
 
 // Convert float array (baseline FP32) to half
-static std::vector<h16> f32_to_f16(const float * x, size_t n) {
-    std::vector<h16> o(n);
+static std::vector<bf16> f32_to_f16(const float * x, size_t n) {
+    std::vector<bf16> o(n);
     for (size_t i = 0; i < n; i++) {
-        o[i] = h16(x[i]);
+        o[i] = bf16(x[i]);
     }
     return o;
 }
@@ -731,7 +839,10 @@ int main(int argc, char ** argv) {
     //}
 
     bool report = true, diffHL = true;
-    pmp = "qwen3_1.7-2.mpgguf";
+    //pmp = "Qwen3-1.7B.mpgguf";
+    //pfp = "Qwen3-1.7B-BF16.gguf";
+
+    pmp = "Qwen3-30B-A3B.mpgguf";
     pfp = "Qwen3-1.7B-BF16.gguf";
 
     if (pmp.empty() || pfp.empty()) {
@@ -785,7 +896,7 @@ int main(int argc, char ** argv) {
                 mx = ad;
             }
         }
-        s += ss / 1000000000;
+        s += ss;
         Nacc += (long double) n;
         if (mx > m) {
             m = mx;
@@ -818,19 +929,19 @@ int main(int argc, char ** argv) {
         }
 
         // Build FP16 truth (accept FP16 or FP32 tensor payloads)
-        std::vector<h16> h_truth(n, h16(float(0.0)));
+        std::vector<bf16> h_truth2(n, bf16(float(0.0)));
         const uint8_t *  tb = gg.whole.data() + tr.off;
-        if (tr.sz == n * sizeof(uint16_t)) {
+        if (tr.g == 30) {
             // baseline FP16
             for (size_t i = 0; i < n; i++) {
                 uint16_t bits;
                 std::memcpy(&bits, tb + i * 2, 2);
-                h_truth[i] = h16(bits);
+                h_truth2[i] = bf16(bits);
             }
-        } else if (tr.sz == n * sizeof(float)) {
+        } else if (tr.g == 0) {
             // baseline FP32
             const float * fp = reinterpret_cast<const float *>(tb);
-            h_truth          = f32_to_f16(fp, n);
+            h_truth2          = f32_to_f16(fp, n);
         } else {
             // Unknown baseline tensor type; treat as zeros (warn if report)
             if (report) {
@@ -838,32 +949,38 @@ int main(int argc, char ** argv) {
             }
         }
 
-        std::vector<float> f32_truths;
-        for (auto &half: h_truth)
-            f32_truths.push_back(half.operator float());
-
-        // HIGH (Q8_0 expected)
-        if (r.sz_high && in_range(r.off_high, r.sz_high, mp.data.size())) {
-            const uint8_t * hb     = mp.data.data() + r.off_high;
-            //auto            d_high = dequant_try(hb, (size_t) r.sz_high, n);
-            auto            d_high = deq_q8_to_f16(hb, (size_t) r.sz_high, n);
-            if (!d_high.empty()) {
-                reduce(d_high, f32_truths, n, s_high, n_high, m_high);
-                validated_high++;
-            } else if (report) {
-                std::cerr << "WARN: unrecognized HIGH payload for " << r.name << "\n";
-            }
+        std::vector<float> f32_truths2;
+        f32_truths2.reserve(h_truth2.size());
+        for (size_t i = 0; i < h_truth2.size(); i++)
+        {
+            f32_truths2.push_back(h_truth2[i].operator float());
         }
 
         // LOW (legacy scalar 2-bit only)
-        if (r.sz_low && in_range(r.off_low, r.sz_low, mp.data.size())) {
+        if (r.sz_low && in_range(r.off_low, r.sz_low, mp.data.size()) && r.g_low == 10)
+        {
             const uint8_t * lb    = mp.data.data() + r.off_low;
             auto            d_low = deq_q2_k_to_f16(lb, (size_t) r.sz_low, n);
             if (!d_low.empty()) {
-                reduce(d_low, f32_truths, n, s_low, n_low, m_low);
+                reduce(d_low, f32_truths2, n, s_low, n_low, m_low);
                 validated_low++;
             } else if (report) {
                 std::cerr << "NOTE: skipping LOW dequant (likely Q2_K / IQ2_*): " << r.name << "\n";
+            }
+        }
+
+        // HIGH (Q8_0 expected)
+        if (r.sz_high && in_range(r.off_high, r.sz_high, mp.data.size()) && r.g_high == 8)
+        {
+            const uint8_t* hb = mp.data.data() + r.off_high;
+            //auto            d_high = dequant_try(hb, (size_t) r.sz_high, n);
+            auto            d_high = deq_q8_to_f16(hb, (size_t)r.sz_high, n);
+            if (!d_high.empty()) {
+                reduce(d_high, f32_truths2, n, s_high, n_high, m_high);
+                validated_high++;
+            }
+            else if (report) {
+                std::cerr << "WARN: unrecognized HIGH payload for " << r.name << "\n";
             }
         }
 
@@ -885,7 +1002,7 @@ int main(int argc, char ** argv) {
             std::cout << tag << ": N=0 (no tensors validated)\n";
             return;
         }
-        long double mse  = 1000000000 * s / Nacc;
+        long double mse  = s / Nacc;
         long double rmse = std::sqrt((long double) mse);
         std::cout << tag << ": tensors=" << ok << "  N=" << (unsigned long long) Nacc << "  MSE=" << (double) mse
                   << "  RMSE=" << (double) rmse << "  max =" << m << "\n";

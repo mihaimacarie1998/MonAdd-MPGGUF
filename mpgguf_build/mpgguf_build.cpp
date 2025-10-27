@@ -13,6 +13,61 @@
 #include <unordered_map>
 #include <vector>
 #include <numeric>
+#include <chrono>
+
+class CTimeMeasure
+{
+    using clock = std::chrono::high_resolution_clock;
+    clock::time_point start;
+    std::string name;
+
+public:
+    // Constructor — starts timing
+    explicit CTimeMeasure(const std::string& name = "")
+        : start(clock::now()), name(name) {}
+
+    // Destructor — stops timing and prints result
+    ~CTimeMeasure()
+    {
+        auto end = clock::now();
+        auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
+        if (!name.empty())
+            std::cout << "[TimeMeasure] " << name << " took "
+            << duration.count() / 1000.0 << " ms\n";
+        else
+            std::cout << "[TimeMeasure] Elapsed: "
+            << duration.count() / 1000.0 << " ms\n";
+    }
+};
+
+static inline uint64_t align64(uint64_t x)
+{
+    return (x + 63ull) & ~63ull;
+}
+
+static inline uint64_t align32(uint64_t x)
+{
+    return (x + 31ull) & ~31ull;
+}
+
+static bool bytes_equal_with_probe(const std::vector<uint8_t>& A,
+    size_t                       offA,
+    const std::vector<uint8_t>& B,
+    size_t                       offB,
+    size_t                       n)
+{
+    if (offA + n > A.size() || offB + n > B.size())
+        return false;
+
+    if (n <= 8ull * 1024 * 1024)
+        return memcmp(A.data() + offA, B.data() + offB, n) == 0;
+
+    if (memcmp(A.data() + offA, B.data() + offB, 1024 * 1024) != 0)
+        return false;
+
+    return memcmp(A.data() + offA + (n - 1024 * 1024), B.data() + offB + (n - 1024 * 1024), 1024 * 1024) == 0;
+}
+
 
 static inline uint32_t rd_le_u32(const uint8_t * p)
 {
@@ -260,10 +315,10 @@ struct TensorInfo
 
 struct GGUFIndex
 {
-    std::unordered_map<std::string, TensorInfo> tensors;
+    std::vector<TensorInfo> tensors;
     std::vector<uint8_t>                        kv_blob;
     std::string                                 file_path;
-    std::vector<uint8_t>                        file_bytes;  // keep bytes for dedup probes only
+    //std::vector<uint8_t>                        file_bytes;  // keep bytes for dedup probes only
 };
 
 static bool overflow_mul_u64(uint64_t a, uint64_t b, uint64_t & out)
@@ -310,7 +365,7 @@ static bool infer_and_check_sizes(std::vector<TensorInfo> & v, size_t file_len)
 
 // parse a tensor table at current cursor location, version-aware for alignment.
 // DOES NOT compute data_sz; that’s done later by infer_and_check_sizes().
-static bool try_parse_table_at(Cursor                    c,
+static bool try_parse_table_at(Cursor&                    c,
                                uint32_t                  version,
                                uint64_t                  n_t,
                                size_t                    file_len,
@@ -384,15 +439,23 @@ static GGUFIndex parse_gguf_index(const std::string & path)
     if (!f)
         throw std::runtime_error("cannot open: " + path);
 
+    CTimeMeasure ms(path);
+
     // Get file size
     f.seekg(0, std::ios::end);
     std::streampos file_size = f.tellg();
     f.seekg(0, std::ios::beg);
 
-    std::vector<uint8_t> buf(static_cast<size_t>(file_size));  // Allocate exact size
-    f.read(reinterpret_cast<char *>(buf.data()), file_size);   // Read directly into buffer
+    // threshold to read the data because all metadata information only will be there.
+    size_t szThreshold = 512 * 1024 * 1024;
+    const size_t  file_len = static_cast<size_t>(file_size);
 
-    const size_t  file_len = buf.size();
+    if (szThreshold > file_len)
+        szThreshold = file_len;
+
+    std::vector<uint8_t> buf(szThreshold);
+    f.read(reinterpret_cast<char *>(buf.data()), (std::streamsize) szThreshold);   // Read directly into buffer
+
     if (file_len < 4)
         throw std::runtime_error("too small: " + path);
 
@@ -438,10 +501,14 @@ static GGUFIndex parse_gguf_index(const std::string & path)
             GGUFIndex gx;
             gx.kv_blob.assign(buf.begin() + kv_start, buf.begin() + kv_end);
             gx.file_path = path;
-            gx.file_bytes.swap(buf);
+            //gx.file_bytes.swap(buf);
+            gx.tensors = tlist;
 
-            for (auto & t : tlist)
-                gx.tensors.emplace(t.name, std::move(t));
+            uint32_t datablock_start = ct.tell();
+            datablock_start = align32(datablock_start);
+
+            for (auto& t : gx.tensors)
+                t.data_off += datablock_start;
 
             return gx;
         }
@@ -471,10 +538,8 @@ static GGUFIndex parse_gguf_index(const std::string & path)
                     gx.kv_blob.assign(buf.begin() + kv_start, buf.begin() + pos);
 
                 gx.file_path  = path;
-                gx.file_bytes = buf;  // keep for potential dedup
-                for (auto & t : tlist)
-                    gx.tensors.emplace(t.name, std::move(t));
-
+                //gx.file_bytes = buf;  // keep for potential dedup
+                gx.tensors = tlist;
                 return gx;
             }
         }
@@ -493,9 +558,8 @@ static GGUFIndex parse_gguf_index(const std::string & path)
 
             GGUFIndex gx;
             gx.file_path = path;
-            gx.file_bytes.swap(buf);
-            for (auto & t : tlist)
-                gx.tensors.emplace(t.name, std::move(t));
+            //gx.file_bytes.swap(buf);
+            gx.tensors = tlist;
 
             return gx;
         }
@@ -504,28 +568,6 @@ static GGUFIndex parse_gguf_index(const std::string & path)
     throw std::runtime_error("unable to locate tensor table in " + path);
 }
 
-static inline uint64_t align64(uint64_t x)
-{
-    return (x + 63ull) & ~63ull;
-}
-
-static bool bytes_equal_with_probe(const std::vector<uint8_t> & A,
-                                   size_t                       offA,
-                                   const std::vector<uint8_t> & B,
-                                   size_t                       offB,
-                                   size_t                       n)
-{
-    if (offA + n > A.size() || offB + n > B.size())
-        return false;
-
-    if (n <= 8ull * 1024 * 1024)
-        return memcmp(A.data() + offA, B.data() + offB, n) == 0;
-
-    if (memcmp(A.data() + offA, B.data() + offB, 1024 * 1024) != 0)
-        return false;
-
-    return memcmp(A.data() + offA + (n - 1024 * 1024), B.data() + offB + (n - 1024 * 1024), 1024 * 1024) == 0;
-}
 
 struct Args
 {
@@ -597,28 +639,30 @@ struct ChunkRef
     uint64_t rel_off;  // destination relative (from DATA start)
 };
 
-static void stream_copy(std::ifstream & src, std::ofstream & dst, uint64_t src_off, uint64_t size)
+static void stream_copy(std::ifstream& src, std::ofstream& dst,
+    uint64_t src_off, uint64_t size)
 {
-    static const size_t BUF = 16 * 1024 * 1024;
-    std::vector<char>   buf(BUF);
-    uint64_t            left = size;
+    // Prepare a buffer exactly 'size' bytes long
+    std::vector<char> buf(size);
+
+    // Reset and position
     src.clear();
     dst.clear();
-    src.seekg((std::streampos) src_off);
+    src.seekg(static_cast<std::streampos>(src_off));
 
-    while (left > 0)
-    {
-        size_t n = (left > BUF) ? BUF : (size_t) left;
-        src.read(buf.data(), (std::streamsize) n);
-        if (src.gcount() != (std::streamsize) n)
-            throw std::runtime_error("short read while copying");
-        dst.write(buf.data(), (std::streamsize) n);
-        left -= n;
-    }
+    // Read the requested size
+    src.read(buf.data(), static_cast<std::streamsize>(size));
+    if (src.gcount() != static_cast<std::streamsize>(size))
+        throw std::runtime_error("short read while copying");
+
+    // Write the buffer
+    dst.write(buf.data(), static_cast<std::streamsize>(size));
 }
 
 int main2(int argc, char ** argv)
 {
+    // --high Qwen3-30B-A3B-Q8_0.gguf --low Qwen3-30B-A3B-Q2_K.gguf --out Qwen3-30B-A3B.mpgguf --kv-from high --manifest Qwen3-30B-A3B.mpgguf.manifest.json
+    // --high Qwen3-1.7B-Q8_0.gguf --low Qwen3-1.7B-Q2_K.gguf --out Qwen3-1.7B.mpgguf --kv-from high --manifest Qwen3-1.7B.mpgguf.manifest.json
     try
     {
         Args args = parse_args(argc, argv);
@@ -644,8 +688,8 @@ int main2(int argc, char ** argv)
             f.seekg(0, std::ios::beg);
             std::vector<TensorInfo *> v;
             v.reserve(idx.tensors.size());
-            for (auto & kv : idx.tensors)
-                v.push_back(&idx.tensors[kv.first]);
+            for (auto & t : idx.tensors)
+                v.push_back(&t);
 
             std::sort(v.begin(), v.end(), [](auto * a, auto * b) { return a->data_off < b->data_off; });
             for (size_t i = 0; i < v.size(); ++i)
@@ -662,14 +706,14 @@ int main2(int argc, char ** argv)
         std::vector<std::string> names;
         names.reserve(idxH.tensors.size() + idxL.tensors.size());
         for (auto & kv : idxH.tensors)
-            names.push_back(kv.first);
+            names.push_back(kv.name);
 
         for (auto & kv : idxL.tensors)
         {
-            if (idxH.tensors.find(kv.first) == idxH.tensors.end())
-                names.push_back(kv.first);
+            if (std::find_if(idxH.tensors.begin(), idxH.tensors.end(), [&](const auto& item) { return item.name == kv.name;}) == idxH.tensors.end())
+                names.push_back(kv.name);
         }
-        std::sort(names.begin(), names.end());
+        //std::sort(names.begin(), names.end());
 
         // KV blob choose
         const std::vector<uint8_t> & kv_blob = (args.kv_from == "high") ? idxH.kv_blob : idxL.kv_blob;
@@ -694,19 +738,21 @@ int main2(int argc, char ** argv)
             return chunks.back().rel_off;
         };
 
+        CTimeMeasure msWrite("Writing to file");
+
         // Progress
         size_t done = 0, total = names.size();
 
         for (const auto & name : names) {
             const TensorInfo * tH  = nullptr;
             const TensorInfo * tL  = nullptr;
-            auto               itH = idxH.tensors.find(name);
+            auto               itH = std::find_if(idxH.tensors.begin(), idxH.tensors.end(), [&](const auto& item) { return item.name == name; });
             if (itH != idxH.tensors.end()) {
-                tH = &itH->second;
+                tH = &(*itH);
             }
-            auto itL = idxL.tensors.find(name);
+            auto itL = std::find_if(idxL.tensors.begin(), idxL.tensors.end(), [&](const auto& item) { return item.name == name; });
             if (itL != idxL.tensors.end()) {
-                tL = &itL->second;
+                tL = &(*itL);
             }
             const TensorInfo * base = tH ? tH : tL;
 
@@ -717,32 +763,20 @@ int main2(int argc, char ** argv)
 
             if (tH && tL)
             {
-                if (tH->data_sz == tL->data_sz && tH->data_sz > 0 &&
-                    bytes_equal_with_probe(idxH.file_bytes, (size_t) tH->data_off, idxL.file_bytes,
-                                           (size_t) tL->data_off, (size_t) tH->data_sz))
+                if (tL)
                 {
-                    r.flags |= (1u << 2);
-                    r.g_fp   = tH->ggml_type;
-                    r.sz_fp  = tH->data_sz;
-                    r.off_fp = append_ref(/*src_id*/ 1, tH->data_off, tH->data_sz);  // use HIGH as source
+                    r.flags |= 1u;
+                    r.g_low   = tL->ggml_type;
+                    r.sz_low  = tL->data_sz;
+                    r.off_low = append_ref(0, tL->data_off, tL->data_sz);
                 }
-                else
-                {
-                    if (tL)
-                    {
-                        r.flags |= 1u;
-                        r.g_low   = tL->ggml_type;
-                        r.sz_low  = tL->data_sz;
-                        r.off_low = append_ref(0, tL->data_off, tL->data_sz);
-                    }
 
-                    if (tH)
-                    {
-                        r.flags |= (1u << 1);
-                        r.g_high   = tH->ggml_type;
-                        r.sz_high  = tH->data_sz;
-                        r.off_high = append_ref(1, tH->data_off, tH->data_sz);
-                    }
+                if (tH)
+                {
+                    r.flags |= (1u << 1);
+                    r.g_high   = tH->ggml_type;
+                    r.sz_high  = tH->data_sz;
+                    r.off_high = append_ref(1, tH->data_off, tH->data_sz);
                 }
             }
             else
@@ -798,30 +832,32 @@ int main2(int argc, char ** argv)
         if (!kv_blob.empty())
             out.write((const char *) kv_blob.data(), (std::streamsize) kv_blob.size());
 
+        // pad & copy
+        auto pad_to = [&](uint64_t abs_off)
+            {
+                std::streampos cur = out.tellp();
+                uint64_t cur_u = (uint64_t)cur;
+                if (cur_u < abs_off)
+                {
+                    static const char zeros[4096] = { 0 };
+                    uint64_t left = abs_off - cur_u;
+                    while (left > 0)
+                    {
+                        size_t n = (left > sizeof(zeros)) ? sizeof(zeros) : (size_t)left;
+                        out.write(zeros, (std::streamsize)n);
+                        left -= n;
+                    }
+                }
+            };
+
         // data start
         std::streampos data_start = out.tellp();
+        data_start = align64(data_start);
+        pad_to(data_start);
 
         // write chunks in order of rel_off
         std::sort(chunks.begin(), chunks.end(),
                   [](const ChunkRef & a, const ChunkRef & b) { return a.rel_off < b.rel_off; });
-
-        // pad & copy
-        auto pad_to = [&](uint64_t abs_off)
-        {
-            std::streampos cur = out.tellp();
-            uint64_t cur_u = (uint64_t) cur;
-            if (cur_u < abs_off)
-            {
-                static const char zeros[4096] = { 0 };
-                uint64_t left = abs_off - cur_u;
-                while (left > 0)
-                {
-                    size_t n = (left > sizeof(zeros)) ? sizeof(zeros) : (size_t) left;
-                    out.write(zeros, (std::streamsize) n);
-                    left -= n;
-                }
-            }
-        };
 
         std::cout << "[mpgguf] writing data..." << std::endl;
         size_t cdone = 0, ctot = chunks.size();

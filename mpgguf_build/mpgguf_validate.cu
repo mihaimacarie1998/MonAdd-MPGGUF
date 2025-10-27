@@ -1,3 +1,5 @@
+%% writefile validate_mpgguf.cu
+
 // mpgguf_validate.cu  — MPGGUF v2 validator with hardened GGUF/MP readers
 //
 // Build:
@@ -52,14 +54,14 @@ static inline bool aligned64(uint64_t x) {
     return (x & 63ull) == 0ull;
 }
 
-static inline bool is_ascii_identifier(const std::string & s) {
+static inline bool is_ascii_identifier(const std::string& s) {
     if (s.empty() || s.size() > 512)
         return false;
 
     for (unsigned char c : s)
     {
         if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '.' ||
-              c == '/' || c == '-')) {
+            c == '/' || c == '-')) {
             return false;
         }
     }
@@ -83,14 +85,14 @@ struct MP
     std::vector<uint8_t> data;
 };
 
-static inline uint32_t rd_u32(const uint8_t * p)
+static inline uint32_t rd_u32(const uint8_t* p)
 {
     uint32_t v;
     memcpy(&v, p, 4);
     return v;
 }
 
-static inline uint64_t rd_u64(const uint8_t * p)
+static inline uint64_t rd_u64(const uint8_t* p)
 {
     uint64_t v;
     memcpy(&v, p, 8);
@@ -99,10 +101,10 @@ static inline uint64_t rd_u64(const uint8_t * p)
 
 static bool in_range(uint64_t off, uint64_t sz, size_t total)
 {
-    return off <= (uint64_t) total && sz <= (uint64_t) total && (off + sz) <= (uint64_t) total;
+    return off <= (uint64_t)total && sz <= (uint64_t)total && (off + sz) <= (uint64_t)total;
 }
 
-bool load_mp(const std::string & path, MP & out)
+bool load_mp(const std::string& path, MP& out)
 {
     std::ifstream f(path, std::ios::binary);
     if (!f) {
@@ -114,16 +116,16 @@ bool load_mp(const std::string & path, MP & out)
     char mg[7];
     f.read(mg, 7);
     uint8_t ver = 0;
-    f.read((char *) &ver, 1);
+    f.read((char*)&ver, 1);
     if (std::string(mg, 7) != "MPGGUF2" || ver != 2) {
         std::cerr << "Not MPGGUF2 (" << path << ")\n";
         return false;
     }
 
     uint64_t kvsz = 0;
-    uint32_t nt   = 0;
-    f.read((char *) &kvsz, 8);
-    f.read((char *) &nt, 4);
+    uint32_t nt = 0;
+    f.read((char*)&kvsz, 8);
+    f.read((char*)&nt, 4);
 
     // Sanity cap on tensor count
     const uint64_t kMaxT = 200000;
@@ -139,7 +141,7 @@ bool load_mp(const std::string & path, MP & out)
     for (uint32_t i = 0; i < nt; i++)
     {
         uint32_t nl = 0;
-        f.read((char *) &nl, 4);
+        f.read((char*)&nl, 4);
         if (nl == 0 || nl > kMaxName)
         {
             std::cerr << "ERROR: mpgguf name length " << nl << "\n";
@@ -154,7 +156,7 @@ bool load_mp(const std::string & path, MP & out)
         }
 
         uint32_t nd = 0;
-        f.read((char *) &nd, 4);
+        f.read((char*)&nd, 4);
         if (nd == 0 || nd > 6)
         {
             std::cerr << "ERROR: mpgguf bad nd=" << nd << " for " << name << "\n";
@@ -163,7 +165,7 @@ bool load_mp(const std::string & path, MP & out)
         std::vector<uint64_t> dims(nd);
         for (uint32_t d = 0; d < nd; ++d)
         {
-            f.read((char *) &dims[d], 8);
+            f.read((char*)&dims[d], 8);
             if (dims[d] == 0 || dims[d] > (uint64_t) 1e10)
             {
                 std::cerr << "ERROR: mpgguf bad dim[" << d << "]=" << dims[d] << " for " << name << "\n";
@@ -172,10 +174,10 @@ bool load_mp(const std::string & path, MP & out)
         }
 
         uint32_t flags = 0, gL = 0, gH = 0, gF = 0;
-        f.read((char *) &flags, 4);
-        f.read((char *) &gL, 4);
-        f.read((char *) &gH, 4);
-        f.read((char *) &gF, 4);
+        f.read((char*)&flags, 4);
+        f.read((char*)&gL, 4);
+        f.read((char*)&gH, 4);
+        f.read((char*)&gF, 4);
         if ((flags & ~0x7u) != 0)
         {
             std::cerr << "ERROR: mpgguf flags reserved bits set for " << name << "\n";
@@ -183,12 +185,12 @@ bool load_mp(const std::string & path, MP & out)
         }
 
         uint64_t oL = 0, sL = 0, oH = 0, sH = 0, oF = 0, sF = 0;
-        f.read((char *) &oL, 8);
-        f.read((char *) &sL, 8);
-        f.read((char *) &oH, 8);
-        f.read((char *) &sH, 8);
-        f.read((char *) &oF, 8);
-        f.read((char *) &sF, 8);
+        f.read((char*)&oL, 8);
+        f.read((char*)&sL, 8);
+        f.read((char*)&oH, 8);
+        f.read((char*)&sH, 8);
+        f.read((char*)&oF, 8);
+        f.read((char*)&sF, 8);
 
         if (flags & 0x1)
         {
@@ -220,11 +222,11 @@ bool load_mp(const std::string & path, MP & out)
     out.kv.resize(kvsz);
     if (kvsz)
     {
-        f.read((char *) out.kv.data(), kvsz);
+        f.read((char*)out.kv.data(), kvsz);
     }
 
-// Data region
-    // 1. Get the current position
+    // Data region
+        // 1. Get the current position
     std::streampos current_pos = f.tellg();
 
     // 2. Seek to the end
@@ -241,13 +243,13 @@ bool load_mp(const std::string & path, MP & out)
 
     // 6. Allocate and read
     out.data.resize(remaining_size);
-    f.read((char *) &out.data[0], remaining_size);
+    f.read((char*)&out.data[0], remaining_size);
 
     //out.data.assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
     const size_t D = out.data.size();
 
     // Range checks now that data size is known
-    for (const auto & r : out.recs)
+    for (const auto& r : out.recs)
     {
         if (r.sz_low && !in_range(r.off_low, r.sz_low, D))
         {
@@ -271,78 +273,78 @@ bool load_mp(const std::string & path, MP & out)
 // =============== GGUF (baseline) reader ===============
 enum
 {
-    GGUF_U8     = 0,
-    GGUF_I8     = 1,
-    GGUF_U16    = 2,
-    GGUF_I16    = 3,
-    GGUF_U32    = 4,
-    GGUF_I32    = 5,
-    GGUF_F32    = 6,
-    GGUF_BOOL   = 7,
+    GGUF_U8 = 0,
+    GGUF_I8 = 1,
+    GGUF_U16 = 2,
+    GGUF_I16 = 3,
+    GGUF_U32 = 4,
+    GGUF_I32 = 5,
+    GGUF_F32 = 6,
+    GGUF_BOOL = 7,
     GGUF_STRING = 8,
-    GGUF_ARRAY  = 9,
-    GGUF_U64    = 10,
-    GGUF_I64    = 11,
-    GGUF_F64    = 12,
-    GGUF_BYTES  = 13
+    GGUF_ARRAY = 9,
+    GGUF_U64 = 10,
+    GGUF_I64 = 11,
+    GGUF_F64 = 12,
+    GGUF_BYTES = 13
 };
 
 static int scalar_size(int t)
 {
     switch (t) {
-        case GGUF_U8:
-        case GGUF_I8:
-        case GGUF_BOOL:
-            return 1;
-        case GGUF_U16:
-        case GGUF_I16:
-            return 2;
-        case GGUF_U32:
-        case GGUF_I32:
-        case GGUF_F32:
-            return 4;
-        case GGUF_U64:
-        case GGUF_I64:
-        case GGUF_F64:
-            return 8;
-        default:
-            return -1;
+    case GGUF_U8:
+    case GGUF_I8:
+    case GGUF_BOOL:
+        return 1;
+    case GGUF_U16:
+    case GGUF_I16:
+        return 2;
+    case GGUF_U32:
+    case GGUF_I32:
+    case GGUF_F32:
+        return 4;
+    case GGUF_U64:
+    case GGUF_I64:
+    case GGUF_F64:
+        return 8;
+    default:
+        return -1;
     }
 }
 
-static std::string rd_s(std::istream & f)
+static std::string rd_s(std::istream& f)
 {
     uint64_t n = 0;
-    f.read((char *) &n, 8);
+    f.read((char*)&n, 8);
     const uint64_t kMaxStr = 4096 * 1024;  // cap for safety
     if (n > kMaxStr) {
         throw std::runtime_error("gguf string length over cap");
     }
-    std::string s((size_t) n, '\0');
+    std::string s((size_t)n, '\0');
     if (n) {
-        f.read(s.data(), (std::streamsize) n);
+        f.read(s.data(), (std::streamsize)n);
     }
     return s;
 }
 
-static void skip_bytes(std::istream & f)
+static void skip_bytes(std::istream& f)
 {
     uint64_t n = 0;
-    f.read((char *) &n, 8);
-    f.seekg((std::streamoff) n, std::ios::cur);
+    f.read((char*)&n, 8);
+    f.seekg((std::streamoff)n, std::ios::cur);
 }
 
-static void skipv(std::istream & f)
+static void skipv(std::istream& f)
 {
     uint32_t t = 0;
-    f.read((char *) &t, 4);
-    int sz = scalar_size((int) t);
+    f.read((char*)&t, 4);
+    int sz = scalar_size((int)t);
     if (sz > 0) {
         f.seekg(sz, std::ios::cur);
         return;
     }
     if (t == GGUF_STRING) {
-        (void) rd_s(f);
+        (void)rd_s(f);
         return;
     }
     if (t == GGUF_BYTES) {
@@ -350,18 +352,18 @@ static void skipv(std::istream & f)
         return;
     }
     if (t == GGUF_ARRAY) {
-        uint32_t et  = 0;
+        uint32_t et = 0;
         uint64_t cnt = 0;
-        f.read((char *) &et, 4);
-        f.read((char *) &cnt, 8);
-        int es = scalar_size((int) et);
+        f.read((char*)&et, 4);
+        f.read((char*)&cnt, 8);
+        int es = scalar_size((int)et);
         if (es > 0) {
-            f.seekg((std::streamoff) es * (std::streamoff) cnt, std::ios::cur);
+            f.seekg((std::streamoff)es * (std::streamoff)cnt, std::ios::cur);
             return;
         }
         if (et == GGUF_STRING) {
             for (uint64_t i = 0; i < cnt; i++) {
-                (void) rd_s(f);
+                (void)rd_s(f);
             }
             return;
         }
@@ -400,7 +402,7 @@ struct GG
     std::vector<uint8_t> whole;
 };
 
-static size_t numel(const std::vector<uint64_t> & d)
+static size_t numel(const std::vector<uint64_t>& d)
 {
     size_t n = 1;
     for (auto v : d) {
@@ -409,7 +411,7 @@ static size_t numel(const std::vector<uint64_t> & d)
     return n;
 }
 
-bool load_fp(const std::string & path, GG & out)
+bool load_fp(const std::string& path, GG& out)
 {
     std::ifstream f(path, std::ios::binary);
     if (!f) {
@@ -425,10 +427,10 @@ bool load_fp(const std::string & path, GG & out)
         return false;
     }
     uint32_t ver = 0;
-    f.read((char *) &ver, 4);
+    f.read((char*)&ver, 4);
     uint64_t n_kv = 0, n_t = 0;
-    f.read((char *) &n_t, 8);
-    f.read((char *) &n_kv, 8);
+    f.read((char*)&n_t, 8);
+    f.read((char*)&n_kv, 8);
 
     // Sanity caps (huge buffers would be nonsense)
     const uint64_t kMaxKV = 200000, kMaxT = 200000;
@@ -444,16 +446,17 @@ bool load_fp(const std::string & path, GG & out)
     // Skip KV
     try {
         for (uint64_t i = 0; i < n_kv; i++) {
-            (void) rd_s(f);
+            (void)rd_s(f);
             skipv(f);
         }
-    } catch (const std::exception & e) {
+    }
+    catch (const std::exception& e) {
         std::cerr << "WARN: KV skip failed: " << e.what() << ", continuing\n";
     }
 
     // Tensor table with sanity checks
     std::vector<GRec> recs;
-    recs.reserve((size_t) n_t);
+    recs.reserve((size_t)n_t);
     for (uint64_t i = 0; i < n_t; i++)
     {
         std::string name = rd_s(f);
@@ -464,7 +467,7 @@ bool load_fp(const std::string & path, GG & out)
         }
 
         uint32_t nd = 0;
-        f.read((char *) &nd, 4);
+        f.read((char*)&nd, 4);
         if (nd == 0 || nd > 6)
         {
             std::cerr << "ERROR: bad nd=" << nd << " for " << name << "\n";
@@ -474,7 +477,7 @@ bool load_fp(const std::string & path, GG & out)
         std::vector<uint64_t> dims(nd);
         for (uint32_t d = 0; d < nd; ++d)
         {
-            f.read((char *) &dims[d], 8);
+            f.read((char*)&dims[d], 8);
             if (dims[d] == 0 || dims[d] > (uint64_t) 1e10)
             {
                 std::cerr << "ERROR: bad dim[" << d << "]=" << dims[d] << " for " << name << "\n";
@@ -483,9 +486,9 @@ bool load_fp(const std::string & path, GG & out)
         }
 
         uint32_t g = 0;
-        f.read((char *) &g, 4);
+        f.read((char*)&g, 4);
         uint64_t off = 0;
-        f.read((char *) &off, 8);
+        f.read((char*)&off, 8);
         if (!aligned32(off))
         {
             std::cerr << "ERROR: tensor data offset not 32B aligned for " << name << "\n";
@@ -497,16 +500,16 @@ bool load_fp(const std::string & path, GG & out)
 
     // Compute sizes by next off / EOF and check monotonicity
     f.seekg(0, std::ios::end);
-    size_t fsz = (size_t) f.tellg();
-    std::vector<GRec *> ord;
+    size_t fsz = (size_t)f.tellg();
+    std::vector<GRec*> ord;
     ord.reserve(recs.size());
-    for (auto & r : recs)
+    for (auto& r : recs)
         ord.push_back(&r);
 
-    std::sort(ord.begin(), ord.end(), [](auto * a, auto * b) { return a->off < b->off; });
+    std::sort(ord.begin(), ord.end(), [](auto* a, auto* b) { return a->off < b->off; });
     for (size_t i = 0; i < ord.size(); ++i)
     {
-        uint64_t nxt = (i + 1 < ord.size()) ? ord[i + 1]->off : (uint64_t) fsz;
+        uint64_t nxt = (i + 1 < ord.size()) ? ord[i + 1]->off : (uint64_t)fsz;
         if (nxt < ord[i]->off) {
             std::cerr << "ERROR: decreasing offsets in baseline\n";
             return false;
@@ -514,14 +517,14 @@ bool load_fp(const std::string & path, GG & out)
         ord[i]->sz = nxt - ord[i]->off;
     }
 
-        // Whole file
+    // Whole file
     f.seekg(0, std::ios::end);
     std::streampos file_size = f.tellg();
     f.seekg(0, std::ios::beg);
 
     out.whole.resize(static_cast<size_t>(file_size));               // Allocate exact size
 
-    f.read(reinterpret_cast<char *>(out.whole.data()), file_size);  // Read directly into buffer
+    f.read(reinterpret_cast<char*>(out.whole.data()), file_size);  // Read directly into buffer
     out.recs = std::move(recs);
 
     return true;
@@ -529,20 +532,20 @@ bool load_fp(const std::string & path, GG & out)
 
 // =============== CUDA Dequant Kernels ===============
 // Q8_0: per 32 values: [float scale][int8 x 32]
-__global__ void k_deq_q8(const int8_t * q, const uint16_t * s, __half * out, int blocks) {
+__global__ void k_deq_q8(const int8_t* q, const uint16_t* s, __half* out, int blocks) {
     int id = blockIdx.x * blockDim.x + threadIdx.x;
     if (id >= blocks) {
         return;
     }
 
-      __half         h   = __ushort_as_half(s[id]);
-    float          d   = __half2float[h];
+    __half         h = __ushort_as_half(s[id]);
+    float          d = __half2float(h);
 
     if (!isfinite(d))
         d = 0.0f;
 
-    const int8_t * src = q + id * QK;
-    __half *       dst = out + id * QK;
+    const int8_t* src = q + id * QK;
+    __half* dst = out + id * QK;
 #pragma unroll
     for (int i = 0; i < QK; i++) {
         dst[i] = __float2half(d * float(src[i]));
@@ -550,19 +553,19 @@ __global__ void k_deq_q8(const int8_t * q, const uint16_t * s, __half * out, int
 }
 
 namespace q2k_detail {
-static constexpr int    QK_K            = 256;
-static constexpr size_t BYTES_PER_BLOCK = 84;
+    static constexpr int    QK_K = 256;
+    static constexpr size_t BYTES_PER_BLOCK = 84;
 
-__device__ __forceinline__ uint16_t ld_u16_le(const uint8_t * p) {
-    // Unaligned little-endian 16-bit load
-    return static_cast<uint16_t>(p[0]) | (static_cast<uint16_t>(p[1]) << 8);
-}
+    __device__ __forceinline__ uint16_t ld_u16_le(const uint8_t* p) {
+        // Unaligned little-endian 16-bit load
+        return static_cast<uint16_t>(p[0]) | (static_cast<uint16_t>(p[1]) << 8);
+    }
 }  // namespace q2k_detail
 
-__global__ void k_deq_q2_k_to_f16(const uint8_t * __restrict__ bytes,
-                                  __half * __restrict__ out,
-                                  size_t n_elems,
-                                  int    blocks) {
+__global__ void k_deq_q2_k_to_f16(const uint8_t* __restrict__ bytes,
+    __half* __restrict__ out,
+    size_t n_elems,
+    int    blocks) {
     using namespace q2k_detail;
 
     int b = blockIdx.x * blockDim.x + threadIdx.x;
@@ -571,33 +574,33 @@ __global__ void k_deq_q2_k_to_f16(const uint8_t * __restrict__ bytes,
     }
 
     const size_t    sb_off = static_cast<size_t>(b) * BYTES_PER_BLOCK;
-    const uint8_t * sb     = bytes + sb_off;
+    const uint8_t* sb = bytes + sb_off;
 
     // d and dmin: fp16 (LE) -> float
-    const uint16_t d16    = ld_u16_le(sb + 0);
+    const uint16_t d16 = ld_u16_le(sb + 0);
     const uint16_t dmin16 = ld_u16_le(sb + 2);
 
-    float d    = __half2float(__ushort_as_half(d16));
+    float d = __half2float(__ushort_as_half(d16));
     float dmin = __half2float(__ushort_as_half(dmin16));
 
     // scales & qs regions
-    const uint8_t * scales = sb + 4;   // 16 bytes
-    const uint8_t * qs     = sb + 20;  // 64 bytes
+    const uint8_t* scales = sb + 4;   // 16 bytes
+    const uint8_t* qs = sb + 20;  // 64 bytes
 
     // tail-guard for last partial super-block
-    const size_t base        = static_cast<size_t>(b) * QK_K;
-    size_t       remaining   = (base >= n_elems) ? 0 : (n_elems - base);
-    int          block_elems = (remaining < (size_t) QK_K) ? (int) remaining : QK_K;
+    const size_t base = static_cast<size_t>(b) * QK_K;
+    size_t remaining = (base >= n_elems) ? 0 : (n_elems - base);
+    int block_elems = (remaining < (size_t)QK_K) ? (int)remaining : QK_K;
     if (block_elems <= 0) {
         return;
     }
 
-// process 16 sub-blocks × 16 weights
+    // process 16 sub-blocks × 16 weights
 #pragma unroll
     for (int sb16 = 0; sb16 < 16; ++sb16) {
-        const uint8_t sm    = scales[sb16];
+        const uint8_t sm = scales[sb16];
         float         scale = d * float(sm & 0x0F);            // low nibble = scale
-        float         minv  = dmin * float((sm >> 4) & 0x0F);  // high nibble = min
+        float         minv = dmin * float((sm >> 4) & 0x0F);  // high nibble = min
 
         // Match CPU behavior: zero non-finite scale/minv
         if (!isfinite(scale)) {
@@ -620,7 +623,7 @@ __global__ void k_deq_q2_k_to_f16(const uint8_t * __restrict__ bytes,
             const int     qi = i;  // 0..255 within super-block
             const uint8_t by = qs[qi >> 2];
             const uint8_t sh = (qi & 3) * 2;
-            const uint8_t q  = (by >> sh) & 0x3;  // 0..3
+            const uint8_t q = (by >> sh) & 0x3;  // 0..3
 
             const float w = scale * float(q) + minv;
             out[base + i] = __float2half_rn(w);  // CPU doesn't post-check w; we cast directly
@@ -638,7 +641,7 @@ static __half* dequant_try_Q8_0(const uint8_t* bytes, size_t sz, size_t n_elems)
     if (sz == expect) {
         std::vector<int8_t>   hq(size_t(blocks) * QK);
         std::vector<uint16_t> hs(blocks);
-        const uint8_t *       p = bytes;
+        const uint8_t* p = bytes;
         for (int b = 0; b < blocks; b++) {
             uint16_t bits;
             memcpy(&bits, p, 2);
@@ -647,24 +650,24 @@ static __half* dequant_try_Q8_0(const uint8_t* bytes, size_t sz, size_t n_elems)
             memcpy(&hq[size_t(b) * QK], p, QK);
             p += QK;
         }
-        int8_t *   dq  = nullptr;
-        uint16_t * ds  = nullptr;
-        __half *   out = nullptr;
+        int8_t* dq = nullptr;
+        uint16_t* ds = nullptr;
+        __half* out = nullptr;
         CUDA_OK(cudaMalloc(&dq, hq.size()));
         CUDA_OK(cudaMalloc(&ds, hs.size() * sizeof(uint16_t)));
         CUDA_OK(cudaMalloc(&out, n_elems * sizeof(__half)));
         CUDA_OK(cudaMemcpy(dq, hq.data(), hq.size(), cudaMemcpyHostToDevice));
         CUDA_OK(cudaMemcpy(ds, hs.data(), hs.size() * sizeof(uint16_t), cudaMemcpyHostToDevice));
         int th = 256, bl = (blocks + th - 1) / th;
-        k_deq_q8<<<bl, th>>>(dq, ds, out, blocks);
+        k_deq_q8 << <bl, th >> > (dq, ds, out, blocks);
         CUDA_OK(cudaDeviceSynchronize());
         cudaFree(dq);
         cudaFree(ds);
         return out;
     }
 }
-    // Try to dequantize a quant payload by size signature; return device FP16 (caller cudaFree) or nullptr
-static __half * dequant_try_Q2_K(const uint8_t * bytes, size_t sz, size_t n_elems)
+// Try to dequantize a quant payload by size signature; return device FP16 (caller cudaFree) or nullptr
+static __half* dequant_try_Q2_K(const uint8_t* bytes, size_t sz, size_t n_elems)
 {
     using namespace q2k_detail;
 
@@ -674,7 +677,7 @@ static __half * dequant_try_Q2_K(const uint8_t * bytes, size_t sz, size_t n_elem
 
     auto ceil_div = [](size_t a, size_t b) {
         return (a + b - 1) / b;
-    };
+        };
     const int    blocks = int(ceil_div(n_elems, size_t(QK_K)));
     const size_t expect = size_t(blocks) * BYTES_PER_BLOCK;
     if (sz != expect) {
@@ -683,8 +686,8 @@ static __half * dequant_try_Q2_K(const uint8_t * bytes, size_t sz, size_t n_elem
     }
 
     // Upload packed payload; allocate output
-    uint8_t * d_bytes = nullptr;
-    __half *  d_out   = nullptr;
+    uint8_t* d_bytes = nullptr;
+    __half* d_out = nullptr;
 
     CUDA_OK(cudaMalloc(&d_bytes, sz));
     CUDA_OK(cudaMemcpy(d_bytes, bytes, sz, cudaMemcpyHostToDevice));
@@ -693,14 +696,14 @@ static __half * dequant_try_Q2_K(const uint8_t * bytes, size_t sz, size_t n_elem
     // Launch 1 thread per super-block
     const int th = 256;
     const int bl = (blocks + th - 1) / th;
-    k_deq_q2_k_to_f16<<<bl, th>>>(d_bytes, d_out, n_elems, blocks);
+    k_deq_q2_k_to_f16 << <bl, th >> > (d_bytes, d_out, n_elems, blocks);
     CUDA_OK(cudaDeviceSynchronize());
 
     cudaFree(d_bytes);
     return d_out;  // device pointer; free with cudaFree
 }
 
-__global__ void k_f32_to_f16(__half * o, const float * x, size_t n)
+__global__ void k_f32_to_f16(__half* o, const float* x, size_t n)
 {
     size_t i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i < n)
@@ -708,7 +711,7 @@ __global__ void k_f32_to_f16(__half * o, const float * x, size_t n)
 }
 
 // =============== Main ===============
-int main(int argc, char ** argv)
+int main(int argc, char** argv)
 {
     std::string pmp, pfp;
     bool report = false, diffHL = false;
@@ -749,13 +752,13 @@ int main(int argc, char ** argv)
     }
 
     // Map baseline by name
-    std::unordered_map<std::string, GRec *> truth;
-    for (auto & r : gg.recs)
+    std::unordered_map<std::string, GRec*> truth;
+    for (auto& r : gg.recs)
         truth[r.name] = &r;
 
-    auto N = [](const std::vector<uint64_t> & d) -> size_t {
+    auto N = [](const std::vector<uint64_t>& d) -> size_t {
         return numel(d);
-    };
+        };
     const size_t kMaxElems = size_t(1) << 36;  // Defensive ~64B elements
 
     // Accumulators
@@ -763,7 +766,7 @@ int main(int argc, char ** argv)
     float  m_low = 0, m_high = 0, m_hl = 0;
     size_t validated_high = 0, validated_low = 0;
 
-    auto reduce = [&](const __half * A, const __half * B, size_t n, double & s, double & Nacc, float & m) {
+    auto reduce = [&](const __half* A, const __half* B, size_t n, double& s, double& Nacc, float& m) {
         std::vector<__half> ha(n), hb(n);
         CUDA_OK(cudaMemcpy(ha.data(), A, n * sizeof(__half), cudaMemcpyDeviceToHost));
         CUDA_OK(cudaMemcpy(hb.data(), B, n * sizeof(__half), cudaMemcpyDeviceToHost));
@@ -781,14 +784,14 @@ int main(int argc, char ** argv)
                 mx = ad;
             }
         }
-        s += ss / 1000000000.0L;
+        s += ss;
         Nacc += double(n);
         if (mx > m) {
             m = mx;
         }
-    };
+        };
 
-    for (const auto & r : mp.recs)
+    for (const auto& r : mp.recs)
     {
         auto it = truth.find(r.name);
         if (it == truth.end())
@@ -797,7 +800,7 @@ int main(int argc, char ** argv)
                 std::cerr << "SKIP (missing in baseline): " << r.name << "\n";
             continue;
         }
-        const GRec & tr = *it->second;
+        const GRec& tr = *it->second;
 
         if (tr.dims != r.dims)
         {
@@ -815,8 +818,8 @@ int main(int argc, char ** argv)
         }
 
         // Build FP16 truth (accept FP16 or FP32 tensor payloads)
-        __half *        d_truth = nullptr;
-        const uint8_t * tb      = gg.whole.data() + tr.off;
+        __half* d_truth = nullptr;
+        const uint8_t* tb = gg.whole.data() + tr.off;
         if (tr.sz == n * sizeof(__half))
         {
             CUDA_OK(cudaMalloc(&d_truth, tr.sz));
@@ -824,12 +827,12 @@ int main(int argc, char ** argv)
         }
         else if (tr.sz == n * sizeof(float))
         {
-            float * df = nullptr;
+            float* df = nullptr;
             CUDA_OK(cudaMalloc(&df, tr.sz));
             CUDA_OK(cudaMemcpy(df, tb, tr.sz, cudaMemcpyHostToDevice));
             CUDA_OK(cudaMalloc(&d_truth, n * sizeof(__half)));
-            int th = 256, bl = (int) ((n + th - 1) / th);
-            k_f32_to_f16<<<bl, th>>>(d_truth, df, n);
+            int th = 256, bl = (int)((n + th - 1) / th);
+            k_f32_to_f16 << <bl, th >> > (d_truth, df, n);
             CUDA_OK(cudaDeviceSynchronize());
             cudaFree(df);
         }
@@ -844,10 +847,10 @@ int main(int argc, char ** argv)
         }
 
         // HIGH (Q8_0 expected)
-        if (r.sz_high && in_range(r.off_high, r.sz_high, mp.data.size()))
+        if (r.sz_high && in_range(r.off_high, r.sz_high, mp.data.size()) && r.g_high == 8)
         {
-            const uint8_t * hb     = mp.data.data() + r.off_high;
-            __half *        d_high = dequant_try_Q8_0(hb, (size_t) r.sz_high, n);
+            const uint8_t* hb = mp.data.data() + r.off_high;
+            __half* d_high = dequant_try_Q8_0(hb, (size_t)r.sz_high, n);
             if (d_high)
             {
                 reduce(d_high, d_truth, n, s_high, n_high, m_high);
@@ -861,10 +864,10 @@ int main(int argc, char ** argv)
         }
 
         // LOW (legacy scalar 2-bit only; Q2_K/IQ2_* skipped)
-        if (r.sz_low && in_range(r.off_low, r.sz_low, mp.data.size()))
+        if (r.sz_low && in_range(r.off_low, r.sz_low, mp.data.size()) && r.g_low == 10)
         {
-            const uint8_t * lb    = mp.data.data() + r.off_low;
-            __half *        d_low = dequant_try_Q2_K(lb, (size_t) r.sz_low, n);
+            const uint8_t* lb = mp.data.data() + r.off_low;
+            __half* d_low = dequant_try_Q2_K(lb, (size_t)r.sz_low, n);
             if (d_low)
             {
                 reduce(d_low, d_truth, n, s_low, n_low, m_low);
@@ -878,16 +881,16 @@ int main(int argc, char ** argv)
         cudaFree(d_truth);
     }
 
-    auto outStats = [&](const char * tag, double s, double Nacc, float m, size_t ok) {
+    auto outStats = [&](const char* tag, double s, double Nacc, float m, size_t ok) {
         if (Nacc <= 0) {
             std::cout << tag << ": N=0 (no tensors validated)\n";
             return;
         }
-        double mse  = s / Nacc;
+        double mse = s / Nacc;
         double rmse = std::sqrt(mse);
-        std::cout << tag << ": tensors=" << ok << "  N=" << (uint64_t) Nacc << "  MSE=" << mse << "  RMSE=" << rmse
-                  << "  max =" << m << "\n";
-    };
+        std::cout << tag << ": tensors=" << ok << "  N=" << (uint64_t)Nacc << "  MSE=" << mse << "  RMSE=" << rmse
+            << "  max =" << m << "\n";
+        };
 
     outStats("HIGH(Q8_0) vs FP16", s_high, n_high, m_high, validated_high);
     outStats("LOW(2-bit)  vs FP16", s_low, n_low, m_low, validated_low);
