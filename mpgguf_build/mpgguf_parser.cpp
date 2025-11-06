@@ -14,9 +14,9 @@ namespace monadd
         f.read(mg, 7);
         uint8_t ver = 0;
         f.read((char*)&ver, 1);
-        if (std::string(mg, 7) != "MPGGUF3" || ver != 3)
+        if (std::string(mg, 7) != MPGG_MAGIC || ver != MPGG_VER)
         {
-            std::cerr << "Not MPGGUF2 (" << path << ")\n";
+            std::cerr << "Not MPGGUF3 (" << path << ")\n";
             return false;  // fixed from original snippet
         }
 
@@ -116,7 +116,7 @@ namespace monadd
         // Data region
         // 1. Get the current position
         std::streampos current_pos = f.tellg();
-        current_pos = align_up(current_pos, 64);
+        current_pos = align_up(current_pos, 32);
 
         // 2. Seek to the end
         f.seekg(0, std::ios::end);

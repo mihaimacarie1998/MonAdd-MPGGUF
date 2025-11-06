@@ -10,10 +10,6 @@
 //   * Computes MSE, RMSE, and max|Δ| vs FP16 baseline (and optional HIGH vs LOW).
 //   * Unknown 2-bit layouts (Q2_K / IQ2_*) are skipped.
 //
-// Differences from CUDA version:
-//   * Uses a minimal IEEE 754 half <-> float converter (software).
-//   * All “device” buffers are std::vector on host.
-//   * Small bug fixed in load_mp(): header check now returns false only when invalid.
 
 #include "gguf_parser.h"
 #include "mpgguf_parser.h"
@@ -173,7 +169,7 @@ static std::vector<bf16> f32_to_f16(const float * x, size_t n) {
 }
 
 // ---------- Main ----------
-int main(int argc, char ** argv) {
+int main3(int argc, char ** argv) {
     std::string pmp;
     //bool        report = false, diffHL = false;
 
@@ -206,24 +202,18 @@ int main(int argc, char ** argv) {
         std::cerr << "bad mpgguf\n";
         return 1;
     }
-    std::vector<GG> ggs;
+    std::vector<std::shared_ptr<GGUFIndex>> ggs;
     ggs.resize(pfps.size());
 
     for (size_t i = 0; i < pfps.size(); i++)
-    {
-        if (!load_fp(i, pfps[i], ggs[i])) 
-        {
-            std::cerr << "bad gguf baseline\n";
-            return 1;
-        }
-    }
+        ggs[i] = parse_gguf_info(i, pfps[i]);
 
     // Map baseline by name
-    std::unordered_map<std::string, GRec *> truth;
+    std::unordered_map<std::string, TensorInfo*> truth;
 
     for (auto& gg:ggs)
     {
-        for (auto& r : gg.recs) 
+        for (auto& r : gg->tensors) 
         {
             truth[r.name] = &r;
         }
@@ -275,7 +265,7 @@ int main(int argc, char ** argv) {
             }
             continue;
         }
-        const GRec & tr = *it->second;
+        const TensorInfo & tr = *it->second;
 
         if (tr.dims != r.dims) {
             if (report) {
@@ -294,9 +284,9 @@ int main(int argc, char ** argv) {
 
         // Build FP16 truth (accept FP16 or FP32 tensor payloads)
         std::vector<bf16> h_truth2(n, bf16(float(0.0)));
-        auto stream_data = readStreamData(ggs[tr.splitId].f, n * sizeof(size_t), tr.off);
+        auto stream_data = readStreamData(ggs[tr.splitId]->f, n * sizeof(size_t), tr.data_off);
         const uint8_t* tb = stream_data.data();
-        if (tr.g == 30) 
+        if (tr.ggml_type == QuantizationType::BF16)
         {
             // baseline FP16
             for (size_t i = 0; i < n; i++) {
@@ -304,12 +294,14 @@ int main(int argc, char ** argv) {
                 std::memcpy(&bits, tb + i * 2, 2);
                 h_truth2[i] = bf16(bits);
             }
-        } else if (tr.g == 0) 
+        } 
+        else if (tr.ggml_type == QuantizationType::F32)
         {
             // baseline FP32
             const float * fp = reinterpret_cast<const float *>(tb);
             h_truth2          = f32_to_f16(fp, n);
-        } else 
+        }
+        else 
         {
             // Unknown baseline tensor type; treat as zeros (warn if report)
             if (report) {
@@ -323,7 +315,7 @@ int main(int argc, char ** argv) {
             f32_truths2.push_back(h_truth2[i].operator float());
 
         // LOW (legacy scalar 2-bit only)
-        if (r.sz_low && in_range(r.off_low, r.sz_low, mp.data_sz) && r.g_low == 10)
+        if (r.flags & 1 && r.sz_low && in_range(r.off_low, r.sz_low, mp.data_sz) && r.g_low == QuantizationType::Q2_K)
         {
             auto data_low = readStreamData(mp.f, r.sz_low, mp.data_offset + r.off_low);
             const uint8_t* lb = data_low.data();
@@ -334,13 +326,13 @@ int main(int argc, char ** argv) {
                 validated_low++;
 
                 std::cout << "Tensor name for INT2_K: " << validated_low << ", " << r.name << "\n";
-            } else if (report) {
+            } 
+            else if (report) 
                 std::cerr << "NOTE: skipping LOW dequant (likely Q2_K / IQ2_*): " << r.name << "\n";
-            }
         }
 
         // HIGH (Q8_0 expected)
-        if (r.sz_high && in_range(r.off_high, r.sz_high, mp.data_sz) && r.g_high == 8)
+        if (r.flags & 2 && r.sz_high && in_range(r.off_high, r.sz_high, mp.data_sz) && r.g_high == QuantizationType::Q8_0)
         {
             auto data_high = readStreamData(mp.f, r.sz_high, mp.data_offset + r.off_high);
             const uint8_t* hb = data_high.data();
@@ -355,18 +347,6 @@ int main(int argc, char ** argv) {
                 std::cerr << "WARN: unrecognized HIGH payload for " << r.name << "\n";
             }
         }
-
-        // Optional HIGH vs LOW
-        //if (diffHL && r.sz_high && r.sz_low && in_range(r.off_high, r.sz_high, mp.data.size()) &&
-        //    in_range(r.off_low, r.sz_low, mp.data.size())) {
-        //    const uint8_t * hb     = mp.data.data() + r.off_high;
-        //    const uint8_t * lb     = mp.data.data() + r.off_low;
-        //    auto            d_high = dequant_try(hb, (size_t) r.sz_high, n);
-        //    auto            d_low  = dequant_try(lb, (size_t) r.sz_low, n);
-        //    if (!d_high.empty() && !d_low.empty()) {
-        //        reduce(d_high, d_low, n, s_hl, n_hl, m_hl);
-        //    }
-        //}
     }
 
     auto outStats = [&](const char * tag, long double s, long double Nacc, float m, size_t ok) {

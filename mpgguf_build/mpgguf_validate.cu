@@ -19,8 +19,9 @@
 
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
-#include "mpgguf_parser.h"
 #include "gguf_parser.h"
+#include "mpgguf_parser.h"
+#include "parser_util.h"
 
 using namespace monadd;
 
@@ -203,7 +204,7 @@ __global__ void k_f32_to_f16(__half* o, const float* x, size_t n)
 }
 
 // =============== Main ===============
-int main5(int argc, char** argv)
+int main(int argc, char** argv)
 {
     /*std::string pmp, pfp;
     bool report = false, diffHL = false;
@@ -252,28 +253,25 @@ int main5(int argc, char** argv)
     std::vector<std::string> pfps = { "Qwen3-30B-A3B-BF16-00001-of-00002.gguf", "Qwen3-30B-A3B-BF16-00002-of-00002.gguf" };
 
     MP mp;
-    if (!load_mp(pmp, mp)) {
+    if (!load_mp(pmp, mp))
+    {
         std::cerr << "bad mpgguf\n";
         return 1;
     }
-    std::vector<GG> ggs;
+    std::vector<std::shared_ptr<GGUFIndex>> ggs;
     ggs.resize(pfps.size());
 
     for (size_t i = 0; i < pfps.size(); i++)
-    {
-        if (!load_fp(i, pfps[i], ggs[i]))
-        {
-            std::cerr << "bad gguf baseline\n";
-            return 1;
-        }
-    }
+        ggs[i] = parse_gguf_info(i, pfps[i]);
 
     // Map baseline by name
-    std::unordered_map<std::string, GRec*> truth;
+    std::unordered_map<std::string, TensorInfo*> truth;
     for (auto& gg : ggs)
     {
-        for (auto& r : gg.recs)
+        for (auto& r : gg->tensors)
+        {
             truth[r.name] = &r;
+        }
     }
 
     auto N = [](const std::vector<uint64_t>& d) -> size_t {
@@ -320,7 +318,7 @@ int main5(int argc, char** argv)
                 std::cerr << "SKIP (missing in baseline): " << r.name << "\n";
             continue;
         }
-        const GRec& tr = *it->second;
+        const TensorInfo& tr = *it->second;
 
         if (tr.dims != r.dims)
         {
@@ -339,18 +337,18 @@ int main5(int argc, char** argv)
 
         // Build FP16 truth (accept FP16 or FP32 tensor payloads)
         __half* d_truth = nullptr;
-        auto stream_data = readStreamData(ggs[tr.splitId].f, n * sizeof(size_t), tr.off);
+        auto stream_data = readStreamData(ggs[tr.splitId]->f, n * sizeof(size_t), tr.data_off);
         const uint8_t* tb = stream_data.data();
-        if (tr.g == 30)
+        if (tr.ggml_type == QuantizationType::BF16)
         {
-            CUDA_OK(cudaMalloc(&d_truth, tr.sz));
-            CUDA_OK(cudaMemcpy(d_truth, tb, tr.sz, cudaMemcpyHostToDevice));
+            CUDA_OK(cudaMalloc(&d_truth, tr.data_sz));
+            CUDA_OK(cudaMemcpy(d_truth, tb, tr.data_sz, cudaMemcpyHostToDevice));
         }
-        else if (tr.g == 0)
+        else if (tr.ggml_type == QuantizationType::F32)
         {
             float* df = nullptr;
-            CUDA_OK(cudaMalloc(&df, tr.sz));
-            CUDA_OK(cudaMemcpy(df, tb, tr.sz, cudaMemcpyHostToDevice));
+            CUDA_OK(cudaMalloc(&df, tr.data_sz));
+            CUDA_OK(cudaMemcpy(df, tb, tr.data_sz, cudaMemcpyHostToDevice));
             CUDA_OK(cudaMalloc(&d_truth, n * sizeof(__half)));
             int th = 256, bl = (int)((n + th - 1) / th);
             k_f32_to_f16 << <bl, th >> > (d_truth, df, n);
@@ -368,7 +366,7 @@ int main5(int argc, char** argv)
         }
 
         // HIGH (Q8_0 expected)
-        if (r.sz_high && in_range(r.off_high, r.sz_high, mp.data_sz) && r.g_high == 8)
+        if (r.flags & 2 && r.sz_high && in_range(r.off_high, r.sz_high, mp.data_sz) && r.g_high == QuantizationType::Q8_0)
         {
             auto data_high = readStreamData(mp.f, r.sz_high, mp.data_offset + r.off_high);
             const uint8_t* hb = data_high.data();
@@ -388,7 +386,7 @@ int main5(int argc, char** argv)
         }
 
         // LOW (legacy scalar 2-bit only; Q2_K/IQ2_* skipped)
-        if (r.sz_low && in_range(r.off_low, r.sz_low, mp.data_sz) && r.g_low == 10)
+        if (r.flags & 1 && r.sz_low && in_range(r.off_low, r.sz_low, mp.data_sz) && r.g_low == QuantizationType::Q2_K)
         {
             auto data_low = readStreamData(mp.f, r.sz_low, mp.data_offset + r.off_low);
             const uint8_t* lb = data_low.data();

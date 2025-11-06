@@ -291,7 +291,5 @@ namespace monadd
         }
     };
 
-    std::unique_ptr<GGUFIndex>              parse_gguf_info(const size_t splitId, const std::string& path);
-
-    bool load_fp(const size_t splitId, const std::string& path, GG& out);
+    std::shared_ptr<GGUFIndex>              parse_gguf_info(const size_t splitId, const std::string& path);
 };

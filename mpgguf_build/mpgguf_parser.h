@@ -5,6 +5,9 @@ namespace monadd
 {
     // ---------- MPGGUF v3 reader ----------
 
+    static const char    MPGG_MAGIC[7] = { 'M', 'P', 'G', 'G', 'U', 'F', '3' };
+    static const uint8_t MPGG_VER = 3;
+
     struct MPRec
     {
         std::string           name;

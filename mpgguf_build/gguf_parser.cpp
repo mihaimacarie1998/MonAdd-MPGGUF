@@ -125,9 +125,9 @@ namespace monadd
     }
 
     // Top-level: parse GGUF index (header, KV skip/probe, tensor table), infer sizes.
-    std::unique_ptr<GGUFIndex> parse_gguf_info(const size_t splitId, const std::string& path)
+    std::shared_ptr<GGUFIndex> parse_gguf_info(const size_t splitId, const std::string& path)
     {
-        std::unique_ptr<GGUFIndex> gx = std::make_unique<GGUFIndex>(path);
+        std::shared_ptr<GGUFIndex> gx = std::make_shared<GGUFIndex>(path);
 
         auto& f = gx->f;
 
@@ -252,124 +252,5 @@ namespace monadd
         }
 
         throw std::runtime_error("unable to locate tensor table in " + path);
-    }
-
-    bool load_fp(const size_t splitId, const std::string& path, GG& out)
-    {
-        //if (!out.Open(path))
-        //{
-        //    std::cerr << "open failed: " << path << "\n";
-        //    return false;
-        //}
-
-        //char mg[4];
-        //out.f.read(mg, 4);
-        //if (std::string(mg, 4) != "GGUF") {
-        //    std::cerr << "not GGUF: " << path << "\n";
-        //    return false;
-        //}
-        //uint32_t ver = 0;
-        //out.f.read((char*)&ver, 4);
-        //uint64_t n_t = 0, n_kv = 0;
-        //out.f.read((char*)&n_t, 8);
-        //out.f.read((char*)&n_kv, 8);
-
-        //const uint64_t kMaxKV = 200000, kMaxT = 200000;
-        //if (n_kv == 0 || n_kv > kMaxKV) {
-        //    std::cerr << "ERROR: suspicious n_kv=" << n_kv << "\n";
-        //    return false;
-        //}
-        //if (n_t == 0 || n_t > kMaxT) {
-        //    std::cerr << "ERROR: suspicious n_t=" << n_t << "\n";
-        //    return false;
-        //}
-
-        //// Skip KV
-        //try {
-        //    for (uint64_t i = 0; i < n_kv; i++) {
-        //        (void)rd_s(out.f);
-        //        skipv(out.f);
-        //    }
-        //}
-        //catch (const std::exception& e) {
-        //    std::cerr << "WARN: KV skip failed: " << e.what() << ", continuing\n";
-        //}
-
-        //// Tensor table
-        //std::vector<GRec> recs;
-        //recs.reserve((size_t)n_t);
-        //for (uint64_t i = 0; i < n_t; i++)
-        //{
-        //    std::string name = rd_s(out.f);
-        //    if (!is_ascii_identifier(name))
-        //    {
-        //        std::cerr << "ERROR: bad tensor name " << name << "\n";
-        //        return false;
-        //    }
-
-        //    uint32_t nd = 0;
-        //    out.f.read((char*)&nd, 4);
-        //    if (nd == 0 || nd > 6)
-        //    {
-        //        std::cerr << "ERROR: bad nd=" << nd << " for " << name << "\n";
-        //        return false;
-        //    }
-
-        //    std::vector<uint64_t> dims(nd);
-        //    for (uint32_t d = 0; d < nd; ++d)
-        //    {
-        //        out.f.read((char*)&dims[d], 8);
-        //        if (dims[d] == 0 || dims[d] > (uint64_t)1e10)
-        //        {
-        //            std::cerr << "ERROR: bad dim[" << d << "]=" << dims[d] << " for " << name << "\n";
-        //            return false;
-        //        }
-        //    }
-
-        //    uint32_t g = 0;
-        //    out.f.read((char*)&g, 4);
-        //    uint64_t off = 0;
-        //    out.f.read((char*)&off, 8);
-        //    if (!aligned32(off))
-        //    {
-        //        std::cerr << "ERROR: tensor data offset not 32B aligned for " << name << "\n";
-        //        return false;
-        //    }
-
-        //    recs.push_back({ splitId, std::move(name), nd, std::move(dims), g, off, 0 });
-        //}
-
-        //// 4) Remember the start of the data block
-        //uint64_t data_block_start = static_cast<uint64_t>(out.f.tellg());
-        //data_block_start = align_up(data_block_start, 32);
-
-        //// Sizes by next off / EOF
-        //out.f.seekg(0, std::ios::end);
-        //size_t fsz = (size_t)out.f.tellg();
-
-        //std::vector<GRec*> ord;
-        //ord.reserve(recs.size());
-        //for (auto& r : recs)
-        //    ord.push_back(&r);
-
-        //std::sort(ord.begin(), ord.end(), [](auto* a, auto* b) { return a->off < b->off; });
-        //for (size_t i = 0; i < ord.size(); ++i)
-        //{
-        //    uint64_t nxt = (i + 1 < ord.size()) ? ord[i + 1]->off : (uint64_t)fsz;
-        //    if (nxt < ord[i]->off)
-        //    {
-        //        std::cerr << "ERROR: decreasing offsets in baseline\n";
-        //        return false;
-        //    }
-        //    ord[i]->sz = nxt - ord[i]->off;
-        //}
-
-        //for (auto& r : recs)
-        //    r.off += data_block_start;
-
-        //// Whole file
-        //out.recs = std::move(recs);
-        //out.f.seekg(0, std::ios::beg);
-        return true;
     }
 }

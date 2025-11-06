@@ -8,9 +8,6 @@
 
 using namespace monadd;
 
-static const char    MPGG_MAGIC[7] = { 'M', 'P', 'G', 'G', 'U', 'F', '3' };
-static const uint8_t MPGG_VER      = 3;
-
 struct Args
 {
     std::string high, low, out, kv_from = "high", manifest;
@@ -140,16 +137,11 @@ int main2(int argc, char ** argv)
         chunks.reserve(names.size() * 3);
         uint64_t cur_rel = 0;
 
-        auto align64 = [](uint64_t x)
-        {
-            return (x + 63ull) & ~63ull;
-        };
-
         auto append_ref = [&](int src_id, uint64_t src_off, uint64_t size) -> uint64_t
         {
-            cur_rel = align64(cur_rel);
+            cur_rel = align_up(cur_rel, 32);
             chunks.push_back({ src_id, src_off, size, cur_rel });
-            cur_rel = align64(cur_rel + size);
+            cur_rel = cur_rel + size;
             return chunks.back().rel_off;
         };
 
@@ -157,7 +149,7 @@ int main2(int argc, char ** argv)
 
         // Progress
         size_t done = 0, total = names.size();
-
+        std::vector<std::string> exp_temples = { "up_exps", "down_exps", "gate_exps" };
         for (const auto & name : names) {
             const TensorInfo * tH  = nullptr;
             const TensorInfo * tL  = nullptr;
@@ -180,10 +172,14 @@ int main2(int argc, char ** argv)
             {
                 if (tL)
                 {
-                    r.flags |= 1u;
-                    r.g_low   = tL->ggml_type;
-                    r.sz_low  = tL->data_sz;
-                    r.off_low = append_ref(0, tL->data_off, tL->data_sz);
+                    // we add low precision tensor only for expert sub-layer components
+                    if (std::find_if(exp_temples.begin(), exp_temples.end(), [&](const std::string& s) { return name.find(s) != std::string::npos; }) != exp_temples.end())
+                    {
+                        r.flags |= 1u;
+                        r.g_low = tL->ggml_type;
+                        r.sz_low = tL->data_sz;
+                        r.off_low = append_ref(0, tL->data_off, tL->data_sz);
+                    }
                 }
 
                 if (tH)
@@ -219,28 +215,28 @@ int main2(int argc, char ** argv)
         // header
         out.write(MPGG_MAGIC, 7);
         out.put((char) MPGG_VER);
-        wr_le_u64(out, (uint64_t) kv_blob.size());
-        wr_le_u32(out, (uint32_t) recs.size());
+        monadd::wr_le_u64(out, (uint64_t) kv_blob.size());
+        monadd::wr_le_u32(out, (uint32_t) recs.size());
 
         // directory
         for (const auto & r : recs)
         {
-            wr_le_u32(out, (uint32_t) r.name.size());
+            monadd::wr_le_u32(out, (uint32_t) r.name.size());
             out.write(r.name.data(), (std::streamsize) r.name.size());
-            wr_le_u32(out, r.nd);
+            monadd::wr_le_u32(out, r.nd);
             for (auto d : r.dims)
-                wr_le_u64(out, d);
+                monadd::wr_le_u64(out, d);
 
-            wr_le_u32(out, r.flags);
-            wr_le_u32(out, r.g_low);
-            wr_le_u32(out, r.g_high);
-            wr_le_u32(out, r.g_fp);
-            wr_le_u64(out, r.off_low);
-            wr_le_u64(out, r.sz_low);
-            wr_le_u64(out, r.off_high);
-            wr_le_u64(out, r.sz_high);
-            wr_le_u64(out, r.off_fp);
-            wr_le_u64(out, r.sz_fp);
+            monadd::wr_le_u32(out, r.flags);
+            monadd::wr_le_u32(out, r.g_low);
+            monadd::wr_le_u32(out, r.g_high);
+            monadd::wr_le_u32(out, r.g_fp);
+            monadd::wr_le_u64(out, r.off_low);
+            monadd::wr_le_u64(out, r.sz_low);
+            monadd::wr_le_u64(out, r.off_high);
+            monadd::wr_le_u64(out, r.sz_high);
+            monadd::wr_le_u64(out, r.off_fp);
+            monadd::wr_le_u64(out, r.sz_fp);
         }
 
         // KV
@@ -267,7 +263,7 @@ int main2(int argc, char ** argv)
 
         // data start
         std::streampos data_start = out.tellp();
-        data_start = align64(data_start);
+        data_start = align_up(data_start, 32);
         pad_to(data_start);
 
         // write chunks in order of rel_off
@@ -279,7 +275,7 @@ int main2(int argc, char ** argv)
         for (const auto & ch : chunks)
         {
             uint64_t abs = (uint64_t) data_start + ch.rel_off;
-            pad_to(abs);
+            //pad_to(abs);
             if (ch.src_id == 1)
                 stream_copy(fH, out, ch.src_off, ch.size);
             else
@@ -297,7 +293,7 @@ int main2(int argc, char ** argv)
         std::ifstream fo(args.out, std::ios::binary | std::ios::ate);
         auto          out_sz = (uint64_t) fo.tellg();
         std::cout << "[mpgguf] wrote: " << args.out << "\n";
-        std::cout << "[mpgguf] size: " << (out_sz / 1e6) << " MB  (data=" << ((align64(cur_rel)) / 1e6)
+        std::cout << "[mpgguf] size: " << (out_sz / 1e6) << " MB  (data=" << ((align_up(cur_rel, 32)) / 1e6)
                   << " MB, kv=" << (kv_blob.size() / 1e3) << " KB)\n";
 
         // optional manifest (small)
@@ -324,7 +320,7 @@ int main2(int argc, char ** argv)
                         mf << ",";
                     mf << "\n";
                 }
-                mf << "  ],\n  \"totals\": {\"data_bytes\": " << align64(cur_rel)
+                mf << "  ],\n  \"totals\": {\"data_bytes\": " << align_up(cur_rel, 32)
                    << ", \"kv_bytes\": " << kv_blob.size() << ", \"file_bytes\": " << out_sz << "}\n}\n";
             }
         }
