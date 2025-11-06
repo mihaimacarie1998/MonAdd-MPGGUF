@@ -19,11 +19,16 @@
     </ProjectConfiguration>
   </ItemGroup>
   <ItemGroup>
+    <ClCompile Include="gguf_parser.cpp" />
     <ClCompile Include="mpgguf_build.cpp" />
+    <ClCompile Include="mpgguf_parser.cpp" />
     <ClCompile Include="mpgguf_validate.cpp" />
+    <ClCompile Include="parser_util.cpp" />
   </ItemGroup>
   <ItemGroup>
-    <None Include="mpgguf_validate.cu" />
+    <ClInclude Include="gguf_parser.h" />
+    <ClInclude Include="mpgguf_parser.h" />
+    <ClInclude Include="parser_util.h" />
   </ItemGroup>
   <PropertyGroup Label="Globals">
     <VCProjectVersion>17.0</VCProjectVersion>
@@ -61,6 +66,7 @@
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
   <ImportGroup Label="ExtensionSettings">
+    <Import Project="$(VCTargetsPath)\BuildCustomizations\CUDA 13.0.props" />
   </ImportGroup>
   <ImportGroup Label="Shared">
   </ImportGroup>
@@ -138,5 +144,6 @@
   </ItemDefinitionGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
+    <Import Project="$(VCTargetsPath)\BuildCustomizations\CUDA 13.0.targets" />
   </ImportGroup>
 </Project>

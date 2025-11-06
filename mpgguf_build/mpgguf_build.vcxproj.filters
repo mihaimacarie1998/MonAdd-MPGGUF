@@ -18,13 +18,28 @@
     <ClCompile Include="mpgguf_build.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="parser_util.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="gguf_parser.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="mpgguf_parser.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="mpgguf_validate.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
   </ItemGroup>
   <ItemGroup>
-    <None Include="mpgguf_validate.cu">
-      <Filter>Source Files</Filter>
-    </None>
+    <ClInclude Include="parser_util.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="gguf_parser.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="mpgguf_parser.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
 </Project>

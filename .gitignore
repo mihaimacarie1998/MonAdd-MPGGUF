@@ -2,3 +2,4 @@
 *.mpgguf
 *.json
 .vs
+x64
