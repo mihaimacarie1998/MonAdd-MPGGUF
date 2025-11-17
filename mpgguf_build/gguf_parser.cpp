@@ -167,6 +167,7 @@ namespace monadd
         const size_t kv_start = c.tell();
         size_t kv_end = kv_start;
 
+        gx->kv_cnt = n_kv;
         // ----------- normal path: skip KV, then parse tensor table at exact end -----------
         try
         {

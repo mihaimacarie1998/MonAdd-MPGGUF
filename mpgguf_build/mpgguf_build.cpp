@@ -70,7 +70,7 @@ struct ChunkRef
 };
 
 
-int main2(int argc, char ** argv)
+int main(int argc, char ** argv)
 {
     // --high Qwen3-30B-A3B-Q8_0.gguf --low Qwen3-30B-A3B-Q2_K.gguf --out Qwen3-30B-A3B.mpgguf --kv-from high --manifest Qwen3-30B-A3B.mpgguf.manifest.json
     // --high Qwen3-1.7B-Q8_0.gguf --low Qwen3-1.7B-Q2_K.gguf --out Qwen3-1.7B.mpgguf --kv-from high --manifest Qwen3-1.7B.mpgguf.manifest.json
@@ -217,6 +217,7 @@ int main2(int argc, char ** argv)
         out.put((char) MPGG_VER);
         monadd::wr_le_u64(out, (uint64_t) kv_blob.size());
         monadd::wr_le_u32(out, (uint32_t) recs.size());
+        monadd::wr_le_u32(out, (uint32_t)idxH->kv_cnt);
 
         // directory
         for (const auto & r : recs)

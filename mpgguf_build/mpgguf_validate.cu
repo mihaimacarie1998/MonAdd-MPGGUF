@@ -204,7 +204,7 @@ __global__ void k_f32_to_f16(__half* o, const float* x, size_t n)
 }
 
 // =============== Main ===============
-int main(int argc, char** argv)
+int main4(int argc, char** argv)
 {
     /*std::string pmp, pfp;
     bool report = false, diffHL = false;

@@ -21,9 +21,10 @@ namespace monadd
         }
 
         uint64_t kvsz = 0;
-        uint32_t nt = 0;
+        uint32_t nt = 0, kv_cnt = 0;
         f.read((char*)&kvsz, 8);
         f.read((char*)&nt, 4);
+        f.read((char*)&kv_cnt, 4);
 
         const uint64_t kMaxT = 200000;
         if (nt == 0 || nt > kMaxT)

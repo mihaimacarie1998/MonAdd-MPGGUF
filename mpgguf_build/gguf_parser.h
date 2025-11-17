@@ -113,6 +113,7 @@ namespace monadd
         std::vector<TensorInfo> tensors;
         std::vector<uint8_t>    kv_blob;
         std::ifstream f;
+        uint32_t  kv_cnt;
 
         bool Open(const std::string& path)
         {
